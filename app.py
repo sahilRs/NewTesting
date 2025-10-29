@@ -4,11 +4,8 @@ import base64
 
 app = Flask(__name__)
 
-# ====== Replace this with your actual expected signature ======
 EXPECTED_SIGNATURE = "BC:ED:D6:DE:6B:B0:3B:3B:1A:A3:49:DB:00:4E:97:D8:DA:F7:EC:FD:4E:20:24:84:37:6D:23:64:BE:C0:AA:BA"
-# =============================================================
 
-# Example package-wise keys (edit as needed)
 valid_keys = {
     "com.sahil.work": {
         "dark": {"is_used": False, "device_id": None, "last_verified": None},
@@ -20,45 +17,39 @@ valid_keys = {
     }
 }
 
-# ---- server-side XOR+Base64 decrypt (must match Android customEncrypt function) ----
 def custom_decrypt(encoded_text: str) -> str:
-    # same key parts as Android
     p1 = "xA9"
     p2 = "fQ7"
     p3 = "Ls2"
-    key = (p1 + p2 + p3).encode('utf-8')  # b'xA9fQ7Ls2'
+    key = (p1 + p2 + p3).encode('utf-8')
 
-    try:
-        data = base64.b64decode(encoded_text)
-    except Exception:
-        raise ValueError("Invalid Base64")
-
+    data = base64.b64decode(encoded_text)
     out = bytearray()
     for i in range(len(data)):
         out.append(data[i] ^ key[i % len(key)])
     return out.decode('utf-8')
+
+def verify_signature(sig_enc):
+    try:
+        signature_plain = custom_decrypt(sig_enc)
+    except:
+        return False
+    return signature_plain == EXPECTED_SIGNATURE
 
 @app.route('/keys', methods=['GET'])
 def verify_key():
     key = request.args.get('key')
     device_id = request.args.get('device_id')
     package = request.args.get('package')
-    sig_enc = request.args.get('sig')  # encrypted signature (XOR+Base64)
+    sig_enc = request.args.get('sig')
 
     if not key or not device_id or not package or not sig_enc:
         return jsonify({"error": "Missing parameters"}), 400
 
-    # decrypt signature
-    try:
-        signature_plain = custom_decrypt(sig_enc)
-    except Exception as e:
-        return jsonify({"error": "Failed to decrypt signature", "detail": str(e)}), 401
+    # signature check HAR CASE ME SAME ERROR
+    if not verify_signature(sig_enc):
+        return jsonify({"error": "Verification failed"}), 403
 
-    # compare
-    if signature_plain != EXPECTED_SIGNATURE:
-        return jsonify({"error": "Signature mismatch"}), 403
-
-    # package & key checks
     if package not in valid_keys:
         return jsonify({"error": "Invalid package"}), 401
 
@@ -69,7 +60,6 @@ def verify_key():
     if key_data["is_used"] and key_data["device_id"] != device_id:
         return jsonify({"error": "Key already in use"}), 403
 
-    # mark used
     valid_keys[package][key] = {
         "is_used": True,
         "device_id": device_id,
@@ -83,20 +73,13 @@ def register_device():
     device_id = request.data.decode('utf-8')
     key = request.args.get('key')
     package = request.args.get('package')
-    sig_enc = request.args.get('sig')  # encrypted signature
+    sig_enc = request.args.get('sig')
 
     if not device_id or not key or not package or not sig_enc:
-        return jsonify({"error": "Missing key or package or device ID or signature"}), 400
+        return jsonify({"error": "Missing parameters"}), 400
 
-    # decrypt signature
-    try:
-        signature_plain = custom_decrypt(sig_enc)
-    except Exception as e:
-        return jsonify({"error": "Failed to decrypt signature", "detail": str(e)}), 401
-
-    # verify signature matches expected
-    if signature_plain != EXPECTED_SIGNATURE:
-        return jsonify({"error": "Signature mismatch"}), 403
+    if not verify_signature(sig_enc):
+        return jsonify({"error": "Verification failed"}), 403
 
     if package not in valid_keys or key not in valid_keys[package]:
         return jsonify({"error": "Invalid key or package"}), 401
@@ -112,5 +95,4 @@ def register_device():
     return jsonify({"message": "Device registered successfully", "key": key}), 201
 
 if __name__ == '__main__':
-    # python app.py
     app.run(host='0.0.0.0', port=5000, debug=True)
