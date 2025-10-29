@@ -7,7 +7,7 @@ app = Flask(__name__)
 # Each package has its own valid keys
 # ---------------------------------------------
 valid_keys = {
-    "com.example": {
+    "com.sahil.work": {
         "dark": {"is_used": False, "device_id": None, "last_verified": None},
         "darkss": {"is_used": False, "device_id": None, "last_verified": None}
     },
