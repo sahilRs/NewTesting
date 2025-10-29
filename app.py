@@ -3,9 +3,9 @@ from datetime import datetime
 
 app = Flask(__name__)
 
-# ---------------------------------------------
-# Each package has its own valid keys
-# ---------------------------------------------
+# ===========================================
+# PACKAGE → KEYS (1 KEY = 1 DEVICE)
+# ===========================================
 valid_keys = {
     "com.sahil.worl": {
         "dark": {"is_used": False, "device_id": None, "last_verified": None},
@@ -17,91 +17,67 @@ valid_keys = {
     }
 }
 
-
-# ---------------------------------------------------------
-# /keys — same as before, but with package name verification
-# ---------------------------------------------------------
+# ===========================================
+# VERIFY KEY (APP LAUNCH)
+# ===========================================
 @app.route('/keys', methods=['GET'])
 def verify_key():
+    package = request.args.get('package')
     key = request.args.get('key')
     device_id = request.args.get('device_id')
-    package_name = request.args.get('package')
 
-    # 🧩 Old style error handling
-    if not key or not device_id or not package_name:
-        return jsonify({"error": "Missing key or device ID"}), 400
+    if not package or not key or not device_id:
+        return jsonify({"error": "Missing package, key or device_id"}), 400
 
-    # ✅ Check if package exists
-    if package_name not in valid_keys:
-        return jsonify({"error": "Invalid package name"}), 401
+    if package not in valid_keys:
+        return jsonify({"error": "Invalid package"}), 401
 
-    # ✅ Check if key exists in that package
-    package_keys = valid_keys[package_name]
-    if key not in package_keys:
-        return jsonify({"error": "Invalid key"}), 401
+    if key not in valid_keys[package]:
+        return jsonify({"error": "Invalid key for this package"}), 401
 
-    key_data = package_keys[key]
+    key_data = valid_keys[package][key]
 
-    # ✅ Device binding check (same as before)
-    if key_data["is_used"] and key_data["device_id"] != device_id:
-        return jsonify({"error": "Key already in use by another device"}), 403
+    # ✅ HARD ONE DEVICE LOCK
+    if key_data["device_id"] is not None and key_data["device_id"] != device_id:
+        return jsonify({"error": "KEY LOCKED TO ANOTHER DEVICE"}), 403
 
-    # ✅ Mark as used
-    package_keys[key] = {
-        "is_used": True,
-        "device_id": device_id,
-        "last_verified": datetime.now().isoformat()
-    }
+    # First time bind
+    if key_data["device_id"] is None:
+        valid_keys[package][key]["device_id"] = device_id
 
-    # ✅ Old style success response
-    return jsonify({
-        "success": True,
-        "message": "Key verified successfully"
-    })
+    valid_keys[package][key]["is_used"] = True
+    valid_keys[package][key]["last_verified"] = datetime.now().isoformat()
 
+    return jsonify({"success": True, "message": "Key verified successfully"})
 
-# ---------------------------------------------------------
-# /ids — unchanged (same as before)
-# ---------------------------------------------------------
-@app.route('/ids', methods=['GET', 'POST'])
-def manage_device_ids():
-    if request.method == 'GET':
-        devices = {
-            f"{pkg}.{key}": data["device_id"]
-            for pkg, keys in valid_keys.items()
-            for key, data in keys.items() if data["is_used"]
-        }
-        return jsonify(devices)
+# ===========================================
+# REGISTER DEVICE (FIRST LOGIN)
+# ===========================================
+@app.route('/ids', methods=['POST'])
+def register_device():
+    package = request.args.get('package')
+    key = request.args.get('key')
+    device_id = request.data.decode('utf-8')
 
-    elif request.method == 'POST':
-        device_id = request.data.decode('utf-8')
-        key = request.args.get('key')
-        package = request.args.get('package')
+    if not package or not key or not device_id:
+        return jsonify({"error": "Missing package, key or device_id"}), 400
 
-        if not device_id or not key or not package:
-            return jsonify({"error": "Missing device ID, key, or package"}), 400
+    if package not in valid_keys or key not in valid_keys[package]:
+        return jsonify({"error": "Invalid package or key"}), 401
 
-        if package not in valid_keys:
-            return jsonify({"error": "Invalid package name"}), 401
+    key_data = valid_keys[package][key]
 
-        package_keys = valid_keys[package]
-        if key not in package_keys:
-            return jsonify({"error": "Invalid key"}), 401
+    # ✅ Prevent use on another device
+    if key_data["device_id"] is not None and key_data["device_id"] != device_id:
+        return jsonify({"error": "KEY ALREADY LINKED TO ANOTHER DEVICE"}), 403
 
-        key_data = package_keys[key]
+    valid_keys[package][key]["device_id"] = device_id
+    valid_keys[package][key]["is_used"] = True
+    valid_keys[package][key]["last_verified"] = datetime.now().isoformat()
 
-        if key_data["is_used"] and key_data["device_id"] != device_id:
-            return jsonify({"error": "Key already in use"}), 403
-
-        package_keys[key]["device_id"] = device_id
-        package_keys[key]["is_used"] = True
-        package_keys[key]["last_verified"] = datetime.now().isoformat()
-
-        return jsonify({
-            "message": "Device registered successfully",
-            "key": key
-        }), 201
+    return jsonify({"message": "Device registered successfully"}), 201
 
 
+# ===========================================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
