@@ -52,26 +52,35 @@ def verify_key():
 
     return jsonify({"success": True, "message": "Key verified successfully"}), 200
 
-@app.route('/ids', methods=['POST'])
-def register_device():
-    device_id = request.data.decode('utf-8')
-    key = request.args.get('key')
-    package = request.args.get('package')
-    sig_enc = request.args.get('sig')
 
-    if not device_id or not key or not package or not sig_enc:
-        return jsonify({"error": "Missing parameters"}), 400
+# ✅ POST = register, GET = list registered
+@app.route('/ids', methods=['GET', 'POST'])
+def handle_ids():
+    if request.method == 'POST':
+        # Register new device
+        device_id = request.data.decode('utf-8')
+        key = request.args.get('key')
+        package = request.args.get('package')
+        sig_enc = request.args.get('sig')
 
-    if not verify_signature(sig_enc):
-        return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
+        if not device_id or not key or not package or not sig_enc:
+            return jsonify({"error": "Missing parameters"}), 400
 
-    if package not in valid_keys or key not in valid_keys[package]:
-        return jsonify({"error": "KEY/PACKAGE NOT FOUND"}), 401
+        if not verify_signature(sig_enc):
+            return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
 
-    valid_keys[package][key]["device_id"] = device_id
-    valid_keys[package][key]["is_used"] = True
+        if package not in valid_keys or key not in valid_keys[package]:
+            return jsonify({"error": "KEY/PACKAGE NOT FOUND"}), 401
 
-    return jsonify({"success": True, "message": "Device registered successfully"}), 201
+        valid_keys[package][key]["device_id"] = device_id
+        valid_keys[package][key]["is_used"] = True
+
+        return jsonify({"success": True, "message": "Device registered successfully"}), 201
+
+    else:
+        # Return all keys with device IDs
+        return jsonify(valid_keys), 200
+
 
 if __name__ == '__main__':
     app.run(debug=True)
