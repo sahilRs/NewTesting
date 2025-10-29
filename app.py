@@ -79,7 +79,7 @@ def register_device():
         return jsonify({"error": "Missing parameters"}), 400
 
     if not verify_signature(sig_enc):
-        return jsonify({"error": "Verification failed"}), 403
+        return jsonify({"error": "Signature Verification failed"}), 403
 
     if package not in valid_keys or key not in valid_keys[package]:
         return jsonify({"error": "Invalid key or package"}), 401
