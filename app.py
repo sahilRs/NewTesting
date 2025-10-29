@@ -10,7 +10,7 @@ EXPECTED_SIGNATURE = "BC:ED:D6:DE:6B:B0:3B:3B:1A:A3:49:DB:00:4E:97:D8:DA:F7:EC:F
 
 # Example package-wise keys (edit as needed)
 valid_keys = {
-    "com.sahil.worl": {
+    "com.sahil.work": {
         "dark": {"is_used": False, "device_id": None, "last_verified": None},
         "darkss": {"is_used": False, "device_id": None, "last_verified": None}
     },
