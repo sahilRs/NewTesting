@@ -171,6 +171,35 @@ def register_device():
         return jsonify({"success": True, "message": "Device registered successfully (Secure Mode)"}), 201
 
 
+@app.route('/used_keys', methods=['GET'])
+def get_used_keys():
+    """Returns a list of all keys currently marked as used across both key pools."""
+    used_keys_list = []
+
+    # 1. Check Simple Keys
+    for key, data in SIMPLE_KEYS.items():
+        if data["is_used"]:
+            used_keys_list.append({
+                "key": key,
+                "package": "Simple Mode (No Package)",
+                "device_id": data["device_id"],
+                "last_verified": data["last_verified"]
+            })
+
+    # 2. Check Secure Keys
+    for package, keys in SECURE_KEYS.items():
+        for key, data in keys.items():
+            if data["is_used"]:
+                used_keys_list.append({
+                    "key": key,
+                    "package": package,
+                    "device_id": data["device_id"],
+                    "last_verified": data["last_verified"]
+                })
+
+    return jsonify({"used_keys": used_keys_list}), 200
+
+
 if __name__ == '__main__':
     # Running the application on a public host and port 5000 is common for deployment.
     app.run(host='0.0.0.0', port=5000, debug=True)
