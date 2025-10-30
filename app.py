@@ -27,18 +27,27 @@ XOR_KEY_STRING = "xA9fQ7Ls2"
 SECURE_KEYS = {
     "com.hul.shikhar.rssm": {
         "d1": {"is_used": False, "device_id": None, "last_verified": None},
-        "d2": {"is_used": False, "device_id": None, "last_verified": None}
+        "d2": {"is_used": False, "device_id": None, "last_verified": None},
+        "d3": {"is_used": False, "device_id": None, "last_verified": None},
     },
     "com.sahil.work": {
         "s1": {"is_used": False, "device_id": None, "last_verified": None},
-        "s2": {"is_used": False, "device_id": None, "last_verified": None}
+        "s2": {"is_used": False, "device_id": None, "last_verified": None},
+        "s3": {"is_used": False, "device_id": None, "last_verified": None}
+    },
+    "com.aebas.aebas_client": {
+        "custom91": {"is_used": False, "device_id": None, "last_verified": None},
+        "custom92": {"is_used": False, "device_id": None, "last_verified": None},
+        "custom93": {"is_used": False, "device_id": None, "last_verified": None},
+        "custom94": {"is_used": False, "device_id": None, "last_verified": None}
     }
 }
 
 # Simple key pool
 SIMPLE_KEYS = {
-    "G-0924-3841-A": {"is_used": False, "device_id": None, "last_verified": None},
-    "G-0924-3841-B": {"is_used": False, "device_id": None, "last_verified": None}
+    "Simple1": {"is_used": False, "device_id": None, "last_verified": None},
+    "Simple2": {"is_used": False, "device_id": None, "last_verified": None},
+    "SIMPLE3": {"is_used": False, "device_id": None, "last_verified": None},
 }
 
 # --- Cryptography Functions ---
