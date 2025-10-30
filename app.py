@@ -24,6 +24,7 @@ def verify_signature(sig_enc):
     except:
         return False
 
+
 @app.route('/keys', methods=['GET'])
 def verify_key():
     key = request.args.get('key')
@@ -37,13 +38,17 @@ def verify_key():
     if not verify_signature(sig_enc):
         return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
 
+    # ✅ PACKAGE check ALWAYS before key check
     if package not in valid_keys:
         return jsonify({"error": "PACKAGE NOT FOUND"}), 401
 
+    # ✅ KEY check now safe (package confirmed)
     if key not in valid_keys[package]:
         return jsonify({"error": "KEY NOT FOUND"}), 401
 
     entry = valid_keys[package][key]
+
+    # ✅ Prevent key reuse from another device
     if entry["is_used"] and entry["device_id"] != device_id:
         return jsonify({"error": "KEY IS USED"}), 403
 
@@ -53,11 +58,10 @@ def verify_key():
     return jsonify({"success": True, "message": "Key verified successfully"}), 200
 
 
-# ✅ POST = register, GET = list registered
+# ✅ POST = register device, GET = list
 @app.route('/ids', methods=['GET', 'POST'])
 def handle_ids():
     if request.method == 'POST':
-        # Register new device
         device_id = request.data.decode('utf-8')
         key = request.args.get('key')
         package = request.args.get('package')
@@ -69,8 +73,11 @@ def handle_ids():
         if not verify_signature(sig_enc):
             return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
 
-        if package not in valid_keys or key not in valid_keys[package]:
-            return jsonify({"error": "KEY/PACKAGE NOT FOUND"}), 401
+        if package not in valid_keys:
+            return jsonify({"error": "PACKAGE NOT FOUND"}), 401
+
+        if key not in valid_keys[package]:
+            return jsonify({"error": "KEY NOT FOUND"}), 401
 
         valid_keys[package][key]["device_id"] = device_id
         valid_keys[package][key]["is_used"] = True
@@ -78,7 +85,6 @@ def handle_ids():
         return jsonify({"success": True, "message": "Device registered successfully"}), 201
 
     else:
-        # Return all keys with device IDs
         return jsonify(valid_keys), 200
 
 
