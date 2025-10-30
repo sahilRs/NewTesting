@@ -1,209 +1,216 @@
-from flask import Flask, request, jsonify
-from datetime import datetime
 import base64
+import time
 import logging
+from flask import Flask, request, jsonify
+
+# --- Configuration and Initialization ---
+
+# Set up logging for better error diagnosis
+logging.basicConfig(level=logging.DEBUG, 
+                    format='%(asctime)s - %(levelname)s - %(message)s')
 
 app = Flask(__name__)
-# Set log level to easily see requests and startup messages
-logging.basicConfig(level=logging.INFO)
 
-# --- CONFIGURATION ---
-
-# Expected signature for secure verification mode
+# The expected signature that the client sends. This MUST be the SHA-256 hash 
+# of the official signing certificate, formatted as a colon-separated hex string.
+# DO NOT CHANGE THIS unless your app's signing key is updated.
 EXPECTED_SIGNATURE = "A4:0D:A8:0A:59:D1:70:CA:A9:50:CF:15:C1:8C:45:4D:47:A3:9B:26:98:9D:8B:64:0E:CD:74:5B:A7:1B:F5:DC"
 
-# Secure Key Pool: Nested by package name, requires signature check
+# The XOR key used for client encryption/server decryption.
+XOR_KEY_STRING = "xA9fQ7Ls2" 
+
+# Secure Key Pool: Keys requiring matching package and valid signature.
+# Use this pool for your keys like 'd1'.
 SECURE_KEYS = {
-    "com.sahil.work": {
-        "dark": {"is_used": False, "device_id": None, "last_verified": None},
-        "darkss": {"is_used": False, "device_id": None, "last_verified": None}
-    },
+    # Existing Package
     "com.hul.shikhar.rssm": {
         "d1": {"is_used": False, "device_id": None, "last_verified": None},
         "d2": {"is_used": False, "device_id": None, "last_verified": None}
-}
+    },
+    # 🎯 NEW PACKAGE ADDED HERE
+    "com.sahil.work": {
+        "s1": {"is_used": False, "device_id": None, "last_verified": None},
+        "s2": {"is_used": False, "device_id": None, "last_verified": None}
+    }
 }
 
-# Simple Key Pool: Flat structure, used when package/signature are missing
+# Simple Key Pool: Keys requiring only the key and device_id (no package/sig).
+# Use this pool for your 'SIMPLE_KEYS'.
 SIMPLE_KEYS = {
-    # Changed the duplicate key from your original snippet to be unique
     "G-0924-3841-A": {"is_used": False, "device_id": None, "last_verified": None},
     "G-0924-3841-B": {"is_used": False, "device_id": None, "last_verified": None}
 }
 
-# --- CRYPTOGRAPHY/SECURITY FUNCTIONS ---
+# --- Cryptography Functions ---
 
 def custom_decrypt(encoded_text: str) -> str:
-    """Decrypts base64 encoded text using a simple XOR key."""
-    # Key construction: "xA9" + "fQ7" + "Ls2"
-    key = ("xA9" + "fQ7" + "Ls2").encode('utf-8')
-    data = base64.b64decode(encoded_text)
-    return "".join(chr(data[i] ^ key[i % len(key)]) for i in range(len(data)))
+    """Decrypts the Base64-encoded, XOR-encrypted signature."""
+    key = XOR_KEY_STRING.encode('utf-8')
+    
+    # Crucial: Client may send padding '=', remove it before decoding if present.
+    try:
+        data = base64.b64decode(encoded_text.rstrip('='))
+    except Exception as e:
+        logging.error(f"Base64 decoding failed for input: {encoded_text}. Error: {e}")
+        return ""
+
+    decrypted_chars = []
+    for i in range(len(data)):
+        decrypted_chars.append(chr(data[i] ^ key[i % len(key)]))
+        
+    return "".join(decrypted_chars)
 
 def verify_signature(sig_enc):
-    """Checks if the decrypted signature matches the expected value."""
+    """
+    Checks if the decrypted signature matches the expected value, 
+    making it robust against client Base64 padding and whitespace.
+    """
+    global EXPECTED_SIGNATURE
+    
     try:
         decrypted_sig = custom_decrypt(sig_enc)
-        return decrypted_sig == EXPECTED_SIGNATURE
+
+        # 🎯 FIX: Normalize both strings before comparison. 
+        # This strips all whitespace and trailing '=' from the decrypted signature.
+        normalized_decrypted_sig = decrypted_sig.strip().rstrip('=')
+        normalized_expected_sig = EXPECTED_SIGNATURE.strip().rstrip('=')
+
+        if normalized_decrypted_sig == normalized_expected_sig:
+            return True
+        else:
+            logging.error(f"❌ SIGNATURE MISMATCH! Expected: '{normalized_expected_sig}' | Received: '{normalized_decrypted_sig}'")
+            return False
+
     except Exception as e:
-        logging.error(f"Signature decryption failed: {e}")
+        logging.error(f"Signature verification failed unexpectedly: {e}")
         return False
 
-# --- API ENDPOINTS ---
+# --- API Endpoints ---
 
 @app.route('/keys', methods=['GET'])
-def verify_key():
-    """Verifies a key using either Secure Mode or Simple Mode."""
+def handle_keys():
+    """Handles key verification and device key lookup."""
     key = request.args.get('key')
     device_id = request.args.get('device_id')
     package = request.args.get('package')
-    sig_enc = request.args.get('sig')
+    sig = request.args.get('sig')
 
-    # Determine if Simple Mode should be used
-    is_simple_mode = not package or not sig_enc
-    current_time = datetime.now().isoformat()
+    # 1. Parameter Check
+    if not key or not device_id:
+        return jsonify({"error": "Missing 'key' or 'device_id'"}), 400
 
-    if is_simple_mode:
-        # --- SIMPLE MODE LOGIC ---
-        logging.info("Attempting key verification in SIMPLE MODE.")
-        if not key or not device_id:
-            return jsonify({"error": "Missing key or device ID for simple verification"}), 400
-
-        if key not in SIMPLE_KEYS:
-            return jsonify({"error": "Invalid key"}), 401
-
-        entry = SIMPLE_KEYS[key]
-
-        # Check for device binding conflict
-        if entry["is_used"] and entry["device_id"] != device_id:
-            return jsonify({"error": "Key is used by another device (Simple Mode)"}), 403
-
-        # Bind the key
-        entry["is_used"] = True
-        entry["device_id"] = device_id
-        entry["last_verified"] = current_time
-
-        return jsonify({"success": True, "message": "Key verified successfully (Simple Mode)"}), 200
-
-    else:
-        # --- SECURE MODE LOGIC ---
-        logging.info("Attempting key verification in SECURE MODE.")
-        if not key or not device_id or not package or not sig_enc:
-            # Should not happen in secure mode, but good to check
-            return jsonify({"error": "Missing key, device_id, package, or sig for secure verification"}), 400
-
-        if not verify_signature(sig_enc):
+    # 2. Determine Mode
+    is_secure_mode = package and sig
+    
+    if is_secure_mode:
+        logging.debug(f"Attempting key verification for key={key} in SECURE MODE.")
+        
+        # 3. Secure Mode Logic
+        if not verify_signature(sig):
             return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
 
-        if package not in SECURE_KEYS:
-            return jsonify({"error": "PACKAGE NOT FOUND"}), 401
-
-        if key not in SECURE_KEYS[package]:
-            return jsonify({"error": "KEY NOT FOUND"}), 401
+        # Check if package exists, then check if key exists within package
+        if package not in SECURE_KEYS or key not in SECURE_KEYS[package]:
+            logging.warning(f"Key/Package not found in SECURE_KEYS: package={package}, key={key}")
+            return jsonify({"error": "Invalid key or package"}), 401
 
         entry = SECURE_KEYS[package][key]
 
-        # Check for device binding conflict
         if entry["is_used"] and entry["device_id"] != device_id:
-            return jsonify({"error": "KEY IS USED by another device"}), 403
+            # Check for existing use
+            logging.warning(f"Key {key} used by different device: {entry['device_id']}")
+            return jsonify({"error": "Key is used by another device (Secure Mode)"}), 403
 
-        # Bind the key
-        entry["is_used"] = True
-        entry["device_id"] = device_id
-        entry["last_verified"] = current_time
+        # Update and succeed
+        if not entry["is_used"]:
+             entry["is_used"] = True
+             entry["device_id"] = device_id
+             logging.info(f"Key {key} registered to new device {device_id}")
 
-        return jsonify({"success": True, "message": "Key verified successfully (Secure Mode)"}), 200
+        entry["last_verified"] = time.time()
+        
+        return jsonify({
+            "success": True, 
+            "message": "Key verified successfully (Secure Mode)"
+        }), 200
+
+    else:
+        logging.debug(f"Attempting key verification for key={key} in SIMPLE MODE.")
+
+        # 4. Simple Mode Logic
+        if key not in SIMPLE_KEYS:
+            # If it's not a SIMPLE key, it's immediately invalid in this mode
+            return jsonify({"error": "Invalid key"}), 401
+
+        entry = SIMPLE_KEYS[key]
+        
+        if entry["is_used"] and entry["device_id"] != device_id:
+            return jsonify({"error": "Key is used by another device (Simple Mode)"}), 403
+
+        # Update and succeed
+        if not entry["is_used"]:
+             entry["is_used"] = True
+             entry["device_id"] = device_id
+             logging.info(f"Simple Key {key} registered to new device {device_id}")
+
+        entry["last_verified"] = time.time()
+
+        return jsonify({
+            "success": True, 
+            "message": "Key verified successfully (Simple Mode)"
+        }), 200
 
 
 @app.route('/ids', methods=['POST'])
-def register_device():
-    """Binds a device ID to a key, using either Secure Mode or Simple Mode."""
-    device_id = request.data.decode('utf-8')
+def handle_ids():
+    """Handles device key registration (Secure Mode POST method from client)."""
+    
+    # 1. Get Parameters from URL
     key = request.args.get('key')
     package = request.args.get('package')
-    sig_enc = request.args.get('sig')
+    sig = request.args.get('sig')
+    
+    # 2. Get device_id from POST body
+    try:
+        device_id = request.data.decode('utf-8').strip()
+    except Exception:
+        device_id = None
 
-    # Determine if Simple Mode should be used
-    is_simple_mode = not package or not sig_enc
-    current_time = datetime.now().isoformat()
+    # 3. Check Mode and Parameters
+    if not key or not package or not sig or not device_id:
+        return jsonify({"error": "Missing key, package, sig in URL or device_id in body"}), 400
 
-    if is_simple_mode:
-        # --- SIMPLE MODE DEVICE REGISTRATION ---
-        logging.info("Attempting device registration in SIMPLE MODE.")
-        if not device_id or not key:
-            return jsonify({"error": "Missing device ID or key for simple registration"}), 400
+    logging.debug(f"Attempting key registration for key={key} in SECURE MODE (POST).")
 
-        if key not in SIMPLE_KEYS:
-            return jsonify({"error": "Invalid key"}), 401
+    # 4. Secure Mode Logic (Signature & Key Check)
+    if not verify_signature(sig):
+        return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
 
-        entry = SIMPLE_KEYS[key]
+    # Check if package exists, then check if key exists within package
+    if package not in SECURE_KEYS or key not in SECURE_KEYS[package]:
+        return jsonify({"error": "Invalid key or package"}), 401
 
-        # Check for device binding conflict
-        if entry["is_used"] and entry["device_id"] != device_id:
-            return jsonify({"error": "Key is used by another device (Simple Mode)"}), 403
+    entry = SECURE_KEYS[package][key]
 
-        # Register the device
-        entry["device_id"] = device_id
-        entry["is_used"] = True
-        entry["last_verified"] = current_time
+    if entry["is_used"] and entry["device_id"] != device_id:
+        return jsonify({"error": "Key is already registered to a different device"}), 403
 
-        return jsonify({"message": "Device registered successfully (Simple Mode)", "key": key}), 201
+    # 5. Success: Register/Update Key
+    entry["is_used"] = True
+    entry["device_id"] = device_id
+    entry["last_verified"] = time.time()
+    
+    logging.info(f"Key {key} successfully registered/re-verified for device {device_id}")
 
-    else:
-        # --- SECURE MODE DEVICE REGISTRATION ---
-        logging.info("Attempting device registration in SECURE MODE.")
-        if not device_id or not key or not package or not sig_enc:
-            return jsonify({"error": "Missing parameters"}), 400
-
-        if not verify_signature(sig_enc):
-            return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
-
-        if package not in SECURE_KEYS or key not in SECURE_KEYS[package]:
-            return jsonify({"error": "KEY/PACKAGE NOT FOUND"}), 401
-
-        entry = SECURE_KEYS[package][key]
-
-        # Check for device binding conflict
-        if entry["is_used"] and entry["device_id"] != device_id:
-            return jsonify({"error": "KEY IS USED by another device"}), 403
-
-        # Register the device
-        entry["device_id"] = device_id
-        entry["is_used"] = True
-        entry["last_verified"] = current_time
-
-        return jsonify({"success": True, "message": "Device registered successfully (Secure Mode)"}), 201
+    return jsonify({
+        "success": True, 
+        "message": "Device registered/verified successfully (Secure Mode)"
+    }), 200
 
 
-@app.route('/used_keys', methods=['GET'])
-def get_used_keys():
-    """Returns a list of all keys currently marked as used across both key pools."""
-    used_keys_list = []
-
-    # 1. Check Simple Keys
-    for key, data in SIMPLE_KEYS.items():
-        if data["is_used"]:
-            used_keys_list.append({
-                "key": key,
-                "package": "Simple Mode (No Package)",
-                "device_id": data["device_id"],
-                "last_verified": data["last_verified"]
-            })
-
-    # 2. Check Secure Keys
-    for package, keys in SECURE_KEYS.items():
-        for key, data in keys.items():
-            if data["is_used"]:
-                used_keys_list.append({
-                    "key": key,
-                    "package": package,
-                    "device_id": data["device_id"],
-                    "last_verified": data["last_verified"]
-                })
-
-    return jsonify({"used_keys": used_keys_list}), 200
-
+# --- Run Application ---
 
 if __name__ == '__main__':
-    # Running the application on a public host and port 5000 is common for deployment.
+    # Running in debug mode is generally NOT recommended for production/live servers
+    # but is useful for initial testing.
     app.run(host='0.0.0.0', port=5000, debug=True)
