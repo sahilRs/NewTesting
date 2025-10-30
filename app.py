@@ -41,7 +41,6 @@ SIMPLE_KEYS = {
     "G-0924-3841-B": {"is_used": False, "device_id": None, "last_verified": None}
 }
 
-
 # --- Cryptography Functions ---
 
 def custom_decrypt(encoded_text: str) -> str:
@@ -170,30 +169,58 @@ def handle_ids():
     except Exception:
         device_id = None
 
-    if not key or not package or not sig or not device_id:
-        return jsonify({"error": "Missing key, package, sig or device_id"}), 400
+    if not key or not device_id:
+        return jsonify({"error": "Missing key or device_id"}), 400
 
-    if not verify_signature(sig):
-        return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
+    # --- Determine mode ---
+    is_secure_mode = package and sig
 
-    if package not in SECURE_KEYS or key not in SECURE_KEYS[package]:
-        return jsonify({"error": "Invalid key or package"}), 401
+    if is_secure_mode:
+        logging.debug(f"Attempting device registration for key={key} in SECURE MODE.")
 
-    entry = SECURE_KEYS[package][key]
+        if not verify_signature(sig):
+            return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
 
-    if entry["is_used"] and entry["device_id"] != device_id:
-        return jsonify({"error": "Key already registered to different device"}), 403
+        if package not in SECURE_KEYS or key not in SECURE_KEYS[package]:
+            return jsonify({"error": "Invalid key or package"}), 401
 
-    entry["is_used"] = True
-    entry["device_id"] = device_id
-    entry["last_verified"] = time.time()
+        entry = SECURE_KEYS[package][key]
 
-    logging.info(f"Key {key} successfully registered to {device_id}")
+        if entry["is_used"] and entry["device_id"] != device_id:
+            return jsonify({"error": "Key already registered to another device (Secure Mode)"}), 403
 
-    return jsonify({
-        "success": True,
-        "message": "Device registered/verified successfully (Secure Mode)"
-    }), 200
+        # Register / verify
+        entry["is_used"] = True
+        entry["device_id"] = device_id
+        entry["last_verified"] = time.time()
+        logging.info(f"Secure key {key} registered to {device_id}")
+
+        return jsonify({
+            "success": True,
+            "message": "Device registered/verified successfully (Secure Mode)"
+        }), 200
+
+    else:
+        logging.debug(f"Attempting device registration for key={key} in SIMPLE MODE.")
+
+        if key not in SIMPLE_KEYS:
+            return jsonify({"error": "Invalid key"}), 401
+
+        entry = SIMPLE_KEYS[key]
+
+        if entry["is_used"] and entry["device_id"] != device_id:
+            return jsonify({"error": "Key already registered to another device (Simple Mode)"}), 403
+
+        # Register / verify
+        entry["is_used"] = True
+        entry["device_id"] = device_id
+        entry["last_verified"] = time.time()
+        logging.info(f"Simple key {key} registered to {device_id}")
+
+        return jsonify({
+            "success": True,
+            "message": "Device registered/verified successfully (Simple Mode)"
+        }), 200
 
 
 # ✅ NEW ENDPOINT: Show used keys (Secure + Simple)
