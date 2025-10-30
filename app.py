@@ -160,6 +160,26 @@ def handle_keys():
             "message": "Key verified successfully (Simple Mode)"
         }), 200
 
+@app.route('/debug_sig', methods=['GET'])
+def debug_signature():
+    """TEMPORARY DEBUG: Decrypts and returns the raw signature string for checking."""
+    sig = request.args.get('sig')
+    if not sig:
+        return jsonify({"error": "Missing 'sig' parameter"}), 400
+
+    decrypted_sig = custom_decrypt(sig)
+    
+    # Also show the normalized version to confirm the stripping works
+    normalized_sig = decrypted_sig.strip().rstrip('=')
+    
+    return jsonify({
+        "encrypted_input": sig,
+        "XOR_KEY_STRING": XOR_KEY_STRING,
+        "decrypted_raw": decrypted_sig,
+        "decrypted_normalized": normalized_sig,
+        "expected_signature": EXPECTED_SIGNATURE
+    }), 200
+
 
 @app.route('/ids', methods=['POST'])
 def handle_ids():
