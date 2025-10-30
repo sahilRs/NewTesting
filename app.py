@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.INFO)
 # --- CONFIGURATION ---
 
 # Expected signature for secure verification mode
-EXPECTED_SIGNATURE = "SIGNATURE 256"
+EXPECTED_SIGNATURE = "A4:0D:A8:0A:59:D1:70:CA:A9:50:CF:15:C1:8C:45:4D:47:A3:9B:26:98:9D:8B:64:0E:CD:74:5B:A7:1B:F5:DC"
 
 # Secure Key Pool: Nested by package name, requires signature check
 SECURE_KEYS = {
@@ -18,6 +18,10 @@ SECURE_KEYS = {
         "dark": {"is_used": False, "device_id": None, "last_verified": None},
         "darkss": {"is_used": False, "device_id": None, "last_verified": None}
     }
+    "com.hul.shikhar.rssm": {
+        "d1": {"is_used": False, "device_id": None, "last_verified": None},
+        "d2": {"is_used": False, "device_id": None, "last_verified": None}
+}
 }
 
 # Simple Key Pool: Flat structure, used when package/signature are missing
