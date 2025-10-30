@@ -17,7 +17,7 @@ SECURE_KEYS = {
     "com.sahil.work": {
         "dark": {"is_used": False, "device_id": None, "last_verified": None},
         "darkss": {"is_used": False, "device_id": None, "last_verified": None}
-    }
+    },
     "com.hul.shikhar.rssm": {
         "d1": {"is_used": False, "device_id": None, "last_verified": None},
         "d2": {"is_used": False, "device_id": None, "last_verified": None}
