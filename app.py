@@ -44,20 +44,20 @@ SIMPLE_KEYS = {
 # --- Cryptography Functions ---
 
 def custom_decrypt(encoded_text: str) -> str:
-    """Decrypts the Base64-encoded, XOR-encrypted signature."""
     key = XOR_KEY_STRING.encode('utf-8')
     
-    # Crucial: Client may send padding '=', remove it before decoding if present.
+    # Fix: re-add missing Base64 padding
+    missing_padding = len(encoded_text) % 4
+    if missing_padding:
+        encoded_text += '=' * (4 - missing_padding)
+
     try:
-        data = base64.b64decode(encoded_text.rstrip('='))
+        data = base64.b64decode(encoded_text)
     except Exception as e:
-        logging.error(f"Base64 decoding failed for input: {encoded_text}. Error: {e}")
+        logging.error(f"Base64 decoding failed: {e}")
         return ""
 
-    decrypted_chars = []
-    for i in range(len(data)):
-        decrypted_chars.append(chr(data[i] ^ key[i % len(key)]))
-        
+    decrypted_chars = [chr(data[i] ^ key[i % len(key)]) for i in range(len(data))]
     return "".join(decrypted_chars)
 
 def verify_signature(sig_enc):
