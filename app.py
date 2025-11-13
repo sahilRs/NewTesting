@@ -49,7 +49,7 @@ STUDENT_DATABASE = {
     ]
 }
 
-
+# --- Verify Route ---
 @app.route('/verify', methods=['POST'])
 def verify():
     data = request.get_json()
@@ -69,29 +69,68 @@ def verify():
     students = STUDENT_DATABASE[class_id]
     return jsonify({"status": "success", "class_id": class_id, "students": students}), 200
 
-
-# --- New Route ---
+# --- Datashow Route ---
 @app.route('/datashow90', methods=['POST'])
 def datashow90():
     data = request.get_json()
 
-    # Check for class_id
     if not data or 'class_id' not in data:
         return jsonify({"status": "failed", "reason": "missing_class_id"}), 400
 
     class_id = str(data['class_id']).strip()
 
-    # Validate class_id
     if class_id not in STUDENT_DATABASE:
         return jsonify({"status": "failed", "reason": "invalid_class_id"}), 404
 
-    # Return all data for the class
     return jsonify({
         "status": "success",
         "class_id": class_id,
         "students": STUDENT_DATABASE[class_id]
     }), 200
 
+# --- New Route: Add Students ---
+@app.route('/addstudents67', methods=['POST'])
+def addstudents67():
+    data = request.get_json()
+
+    required_fields = [
+        "student_name",
+        "student_class",
+        "student_fathername",
+        "student_mothername",
+        "student_rollno",
+        "student_address",
+        "student_number"
+    ]
+
+    if not data or not all(field in data for field in required_fields):
+        return jsonify({"status": "failed", "reason": "missing_parameters"}), 400
+
+    class_id = str(data["student_class"]).strip()
+
+    # If class does not exist, create it
+    if class_id not in STUDENT_DATABASE:
+        STUDENT_DATABASE[class_id] = []
+
+    # Check for duplicate roll number
+    for student in STUDENT_DATABASE[class_id]:
+        if student["student_rollno"] == data["student_rollno"]:
+            return jsonify({"status": "failed", "reason": "duplicate_rollno"}), 409
+
+    # Add new student
+    new_student = {
+        "student_name": data["student_name"],
+        "student_class": data["student_class"],
+        "student_fathername": data["student_fathername"],
+        "student_mothername": data["student_mothername"],
+        "student_rollno": data["student_rollno"],
+        "student_address": data["student_address"],
+        "student_number": data["student_number"]
+    }
+
+    STUDENT_DATABASE[class_id].append(new_student)
+
+    return jsonify({"status": "success", "message": "student_added", "student": new_student}), 200
 
 # --- Run Application ---
 if __name__ == '__main__':
