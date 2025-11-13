@@ -54,24 +54,43 @@ STUDENT_DATABASE = {
 def verify():
     data = request.get_json()
 
-    # Validate input
     if not data or 'school_id' not in data or 'class_id' not in data:
         return jsonify({"status": "failed", "reason": "missing_parameters"}), 400
 
     school_id = data['school_id']
     class_id = str(data['class_id']).strip()
 
-    # Step 1: Verify school_id
     if school_id != VALID_SCHOOL_ID:
         return jsonify({"status": "failed", "reason": "invalid_school_id"}), 401
 
-    # Step 2: Verify class_id
     if class_id not in STUDENT_DATABASE:
         return jsonify({"status": "failed", "reason": "invalid_class_id"}), 401
 
-    # Step 3: Return student list
     students = STUDENT_DATABASE[class_id]
     return jsonify({"status": "success", "class_id": class_id, "students": students}), 200
+
+
+# --- New Route ---
+@app.route('/datashow90', methods=['POST'])
+def datashow90():
+    data = request.get_json()
+
+    # Check for class_id
+    if not data or 'class_id' not in data:
+        return jsonify({"status": "failed", "reason": "missing_class_id"}), 400
+
+    class_id = str(data['class_id']).strip()
+
+    # Validate class_id
+    if class_id not in STUDENT_DATABASE:
+        return jsonify({"status": "failed", "reason": "invalid_class_id"}), 404
+
+    # Return all data for the class
+    return jsonify({
+        "status": "success",
+        "class_id": class_id,
+        "students": STUDENT_DATABASE[class_id]
+    }), 200
 
 
 # --- Run Application ---
