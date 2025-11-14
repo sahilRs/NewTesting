@@ -62,7 +62,7 @@ def save_db(db):
     with open(DB_FILE, "w") as f:
         json.dump(db, f, indent=4)
 
-# --- Verify Route ---
+# --- Verify School ID and Class ---
 @app.route('/verify', methods=['POST'])
 def verify():
     data = request.get_json()
@@ -96,7 +96,7 @@ def datashow90():
 
     return jsonify({"status": "success", "class_id": class_id, "students": db[class_id]}), 200
 
-# --- Add Student Route ---
+# --- Add new student ---
 @app.route('/addstudents67', methods=['POST'])
 def add_student():
     data = request.get_json()
@@ -119,6 +119,29 @@ def add_student():
     db[class_id].append(new_student)
     save_db(db)
     return jsonify({"status": "success", "student": new_student}), 200
+
+# --- Add new class ---
+@app.route('/addclass90', methods=['POST'])
+def add_class():
+    data = request.get_json()
+    if not data or 'school_id' not in data or 'class_id' not in data:
+        return jsonify({"status": "failed", "reason": "missing_parameters"}), 400
+
+    school_id = data.get("school_id")
+    class_id = str(data.get("class_id")).strip()
+    VALID_SCHOOL_ID = "SCHL123"
+
+    if school_id != VALID_SCHOOL_ID:
+        return jsonify({"status": "failed", "reason": "invalid_school_id"}), 401
+
+    db = load_db()
+    if class_id in db:
+        return jsonify({"status": "failed", "reason": "class_already_exists"}), 409
+
+    # Create empty list for new class
+    db[class_id] = []
+    save_db(db)
+    return jsonify({"status": "success", "class_id": class_id}), 200
 
 # --- Run Server ---
 if __name__ == '__main__':
