@@ -8,48 +8,7 @@ DB_FILE = "students_db.json"
 
 # --- Initialize DB if it doesn't exist ---
 if not os.path.exists(DB_FILE):
-    STUDENT_DATABASE = {
-        "9": [
-            {
-                "student_name": "RAVI KUMAR",
-                "student_class": "9",
-                "student_fathername": "RAKESH KUMAR",
-                "student_mothername": "PRIYA KUMARI",
-                "student_rollno": 11,
-                "student_address": "PATNA, INDIA",
-                "student_number": "9801234567"
-            },
-            {
-                "student_name": "ANITA SINGH",
-                "student_class": "9",
-                "student_fathername": "SURESH SINGH",
-                "student_mothername": "KAVITA SINGH",
-                "student_rollno": 12,
-                "student_address": "DELHI, INDIA",
-                "student_number": "9812345678"
-            }
-        ],
-        "12": [
-            {
-                "student_name": "SAHIL ALAM",
-                "student_class": "12",
-                "student_fathername": "TESTF",
-                "student_mothername": "TESTM",
-                "student_rollno": 28,
-                "student_address": "DELHI, INDIA",
-                "student_number": "95026367272"
-            },
-            {
-                "student_name": "MOHIT VERMA",
-                "student_class": "12",
-                "student_fathername": "ARUN VERMA",
-                "student_mothername": "GEETA VERMA",
-                "student_rollno": 29,
-                "student_address": "NOIDA, INDIA",
-                "student_number": "9810098100"
-            }
-        ]
-    }
+
     with open(DB_FILE, "w") as f:
         json.dump(STUDENT_DATABASE, f, indent=4)
 
