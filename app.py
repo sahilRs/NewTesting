@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import os
 import json
+import base64
 
 app = Flask(__name__)
 
@@ -17,7 +18,8 @@ if not os.path.exists(DB_FILE):
                 "student_mothername": "PRIYA KUMARI",
                 "student_rollno": 11,
                 "student_address": "PATNA, INDIA",
-                "student_number": "9801234567"
+                "student_number": "9801234567",
+                "student_image": ""  # empty base64
             },
             {
                 "student_name": "ANITA SINGH",
@@ -26,7 +28,8 @@ if not os.path.exists(DB_FILE):
                 "student_mothername": "KAVITA SINGH",
                 "student_rollno": 12,
                 "student_address": "DELHI, INDIA",
-                "student_number": "9812345678"
+                "student_number": "9812345678",
+                "student_image": ""
             }
         ],
         "12": [
@@ -37,16 +40,8 @@ if not os.path.exists(DB_FILE):
                 "student_mothername": "TESTM",
                 "student_rollno": 28,
                 "student_address": "DELHI, INDIA",
-                "student_number": "95026367272"
-            },
-            {
-                "student_name": "MOHIT VERMA",
-                "student_class": "12",
-                "student_fathername": "ARUN VERMA",
-                "student_mothername": "GEETA VERMA",
-                "student_rollno": 29,
-                "student_address": "NOIDA, INDIA",
-                "student_number": "9810098100"
+                "student_number": "95026367272",
+                "student_image": ""
             }
         ]
     }
@@ -113,7 +108,8 @@ def add_student():
         "student_mothername": data.get("student_mothername"),
         "student_rollno": int(data.get("student_rollno")),
         "student_address": data.get("student_address"),
-        "student_number": data.get("student_number")
+        "student_number": data.get("student_number"),
+        "student_image": data.get("student_image", "")  # optional Base64 image
     }
 
     db[class_id].append(new_student)
@@ -138,7 +134,6 @@ def add_class():
     if class_id in db:
         return jsonify({"status": "failed", "reason": "class_already_exists"}), 409
 
-    # Create empty list for new class
     db[class_id] = []
     save_db(db)
     return jsonify({"status": "success", "class_id": class_id}), 200
@@ -165,6 +160,7 @@ def update_student():
             student["student_mothername"] = data.get("student_mothername")
             student["student_address"] = data.get("student_address")
             student["student_number"] = data.get("student_number")
+            student["student_image"] = data.get("student_image", student.get("student_image",""))
             save_db(db)
             return jsonify({"status":"success"}),200
 
