@@ -143,6 +143,52 @@ def add_class():
     save_db(db)
     return jsonify({"status": "success", "class_id": class_id}), 200
 
+# --- Update student ---
+@app.route('/updateStudent90', methods=['POST'])
+def update_student():
+    data = request.get_json()
+    school_id = data.get("school_id")
+    class_id = str(data.get("class_id")).strip()
+    rollno = int(data.get("student_rollno"))
+
+    if school_id != "SCHL123":
+        return jsonify({"status":"failed","reason":"invalid_school_id"}),401
+
+    db = load_db()
+    if class_id not in db:
+        return jsonify({"status":"failed","reason":"invalid_class_id"}),404
+
+    for student in db[class_id]:
+        if student["student_rollno"] == rollno:
+            student["student_name"] = data.get("student_name")
+            student["student_fathername"] = data.get("student_fathername")
+            student["student_mothername"] = data.get("student_mothername")
+            student["student_address"] = data.get("student_address")
+            student["student_number"] = data.get("student_number")
+            save_db(db)
+            return jsonify({"status":"success"}),200
+
+    return jsonify({"status":"failed","reason":"student_not_found"}),404
+
+# --- Delete student ---
+@app.route('/deleteStudent90', methods=['POST'])
+def delete_student():
+    data = request.get_json()
+    school_id = data.get("school_id")
+    class_id = str(data.get("class_id")).strip()
+    rollno = int(data.get("student_rollno"))
+
+    if school_id != "SCHL123":
+        return jsonify({"status":"failed","reason":"invalid_school_id"}),401
+
+    db = load_db()
+    if class_id not in db:
+        return jsonify({"status":"failed","reason":"invalid_class_id"}),404
+
+    db[class_id] = [s for s in db[class_id] if s["student_rollno"] != rollno]
+    save_db(db)
+    return jsonify({"status":"success"}),200
+
 # --- Run Server ---
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
