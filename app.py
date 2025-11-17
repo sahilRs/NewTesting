@@ -77,6 +77,44 @@ def verify_signature(sig_enc):
 
 
 # ------------------- ADD KEYS API ----------------------------
+# ------------------- DELETE KEYS API ------------------------
+
+@app.route('/delete_keys', methods=['POST'])
+def delete_keys():
+    data = request.json
+    package = data.get("package")
+    keys = data.get("keys")
+
+    if not package or not keys:
+        return jsonify({"error": "Missing 'package' or 'keys'"}), 400
+
+    db = load_db()
+
+    if package not in db["packages"]:
+        return jsonify({"error": "Package not found"}), 404
+
+    deleted = []
+    not_found = []
+
+    for key in keys:
+        if key in db["packages"][package]:
+            del db["packages"][package][key]
+            deleted.append(key)
+        else:
+            not_found.append(key)
+
+    # If package becomes empty -> delete package section
+    if len(db["packages"][package]) == 0:
+        del db["packages"][package]
+
+    save_db(db)
+
+    return jsonify({
+        "success": True,
+        "package": package,
+        "deleted_keys": deleted,
+        "not_found_keys": not_found
+    }), 200
 
 @app.route('/add_keys', methods=['POST'])
 def add_keys():
