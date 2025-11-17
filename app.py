@@ -267,9 +267,15 @@ def verify_signature(sig_enc: str) -> bool:
     except Exception:
         return False
 
-# ----------------- API: add_keys (bulk) -----------------
+
 @app.route("/add_keys", methods=["POST"])
 def add_keys():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "NAINAK82JS":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON body"}), 400
@@ -279,16 +285,13 @@ def add_keys():
     if not keys or not isinstance(keys, list):
         return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
 
-    # reload latest disk copy first
     global db
     db = load_db()
 
     if not package:
-        # Add into SIMPLE_KEYS
         for k in keys:
             db["SIMPLE_KEYS"][k] = {"is_used": False, "device_id": None, "last_verified": None}
     else:
-        # Add into SECURE_KEYS[package]
         if package not in db["SECURE_KEYS"]:
             db["SECURE_KEYS"][package] = {}
         for k in keys:
@@ -296,18 +299,21 @@ def add_keys():
 
     save_db(db)
     return force_download(DB_FILE, "keys_db.json")
-
 # ----------------- API: delete_keys (bulk) -----------------
 @app.route("/delete_keys", methods=["POST"])
 def delete_keys():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "NAINAK82JS":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON body"}), 400
 
     package = data.get("package")
     keys = data.get("keys")
-    if not keys or not isinstance(keys, list):
-        return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
 
     global db
     db = load_db()
@@ -316,7 +322,6 @@ def delete_keys():
     not_found = []
 
     if not package:
-        # delete from SIMPLE_KEYS
         for k in keys:
             if k in db["SIMPLE_KEYS"]:
                 del db["SIMPLE_KEYS"][k]
@@ -325,32 +330,36 @@ def delete_keys():
                 not_found.append(k)
     else:
         if package not in db["SECURE_KEYS"]:
-            return jsonify({"error": "Package not found in SECURE_KEYS"}), 404
+            return jsonify({"error": "Package not found"}), 404
+
         for k in keys:
             if k in db["SECURE_KEYS"][package]:
                 del db["SECURE_KEYS"][package][k]
                 deleted.append(k)
             else:
                 not_found.append(k)
-        # if package becomes empty, remove package entry
-        if package in db["SECURE_KEYS"] and not db["SECURE_KEYS"][package]:
+
+        if not db["SECURE_KEYS"][package]:
             del db["SECURE_KEYS"][package]
 
-    # persist and return current DB file
     save_db(db)
     return force_download(DB_FILE, "keys_db.json")
 
 # ----------------- API: add single key (compat) -----------------
 @app.route("/add_key", methods=["POST"])
 def add_key():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "NAINAK82JS":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
 
     package = data.get("package")
     key = data.get("key")
-    if not key:
-        return jsonify({"error": "key is required"}), 400
 
     global db
     db = load_db()
@@ -368,14 +377,18 @@ def add_key():
 # ----------------- API: delete single key (compat) -----------------
 @app.route("/delete_key", methods=["POST"])
 def delete_key():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "NAINAK82JS":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
 
     package = data.get("package")
     key = data.get("key")
-    if not key:
-        return jsonify({"error": "key is required"}), 400
 
     global db
     db = load_db()
@@ -386,18 +399,18 @@ def delete_key():
             save_db(db)
             return force_download(DB_FILE, "keys_db.json")
         else:
-            return jsonify({"error": "Key not found in SIMPLE_KEYS"}), 404
+            return jsonify({"error": "Key not found"}), 404
     else:
         if package in db["SECURE_KEYS"] and key in db["SECURE_KEYS"][package]:
             del db["SECURE_KEYS"][package][key]
-            # remove empty package
+
             if not db["SECURE_KEYS"][package]:
                 del db["SECURE_KEYS"][package]
+
             save_db(db)
             return force_download(DB_FILE, "keys_db.json")
         else:
-            return jsonify({"error": "Key not found in SECURE_KEYS for this package"}), 404
-
+            return jsonify({"error": "Key not found in secure package"}), 404
 # ----------------- API: keys verification (GET) -----------------
 @app.route("/keys", methods=["GET"])
 def handle_keys():
