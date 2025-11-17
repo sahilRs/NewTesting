@@ -4,12 +4,11 @@ import base64
 import time
 import logging
 import sqlite3
-from threading import Lock
 from flask import Flask, request, jsonify, make_response
 
 # ---------------- LOGGING ----------------
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
@@ -19,12 +18,11 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# ---------------- Files / constants ----------------
-SQLITE_DB = "keys.sqlite"
-JSON_BACKUP = "keys_db.json"
-_db_lock = Lock()
+# --- filenames (keep keys_db.json for compatibility with original clients) ---
+DB_JSON_FILE = "keys_db.json"   # returned by endpoints exactly as before
+DB_SQLITE_FILE = "keys.db"      # internal authoritative store to avoid corruption
 
-# ---------------- DEFAULT KEYS ----------------
+# ---------------- DEFAULT DB (used only if DB file missing/corrupt) ----------------
 DEFAULT_DB = {
     "SECURE_KEYS": {
         "com.hul.shikhar.rssm": {
@@ -47,169 +45,344 @@ DEFAULT_DB = {
     }
 }
 
-# ---------------- Signature (CHANGE THESE IF EVER EXPOSED!) ----------------
+# --- Signature settings (kept from earlier) ---
 EXPECTED_SIGNATURE = "1D:03:E2:BD:74:A8:FB:B3:2D:B8:28:F1:16:7B:CC:56:3C:F1:AD:B4:CA:16:8B:6F:FD:D4:08:43:92:41:B3:0C"
 XOR_KEY_STRING = "xA9fQ7Ls2"
 
-# ---------------- Admin Tokens (no longer in URL!) ----------------
-ADMIN_TOKEN_ADD_DELETE = "NAINAK82JS"          # for add/delete/list
-ADMIN_TOKEN_DOWNLOAD    = "XNSLNSJ"            # for download
-ADMIN_TOKEN_UPLOAD      = "ADMINUPLOAD9027"    # for upload/restore
 
-# ---------------- SQLite Helpers ----------------
-def _get_conn():
-    conn = sqlite3.connect(SQLITE_DB, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+# ---------------- PASSWORDS (as requested) ----------------
+PASS_DELETE = "HJSPCH"
+PASS_ADD = "JDJDODO"
+PASS_DOWNLOAD = "JDKDXPCHE"
+PASS_UPLOAD = "DJJDJSDPS"
 
+
+# ---------------- SQLite helpers (authoritative store) ----------------
 def init_sqlite():
-    with _db_lock:
-        conn = _get_conn()
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS secure_keys (
+            package TEXT NOT NULL,
+            key_value TEXT NOT NULL,
+            is_used INTEGER DEFAULT 0,
+            device_id TEXT,
+            last_verified REAL,
+            PRIMARY KEY (package, key_value)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS simple_keys (
+            key_value TEXT PRIMARY KEY,
+            is_used INTEGER DEFAULT 0,
+            device_id TEXT,
+            last_verified REAL
+        )
+    """)
+    con.commit()
+    con.close()
+
+
+def sql_load_from_json_if_needed():
+    """
+    If sqlite DB empty and keys_db.json exists, load it.
+    If neither exists, create both from DEFAULT_DB.
+    Always ensure JSON snapshot exists.
+    """
+    init_sqlite()
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+
+    # check whether DB has data
+    cur.execute("SELECT COUNT(*) FROM simple_keys")
+    simple_count = cur.fetchone()[0]
+    cur.execute("SELECT COUNT(*) FROM secure_keys")
+    secure_count = cur.fetchone()[0]
+
+    if (simple_count == 0 and secure_count == 0) and os.path.exists(DB_JSON_FILE):
+        # try to load JSON into sqlite
         try:
-            c = conn.cursor()
-            c.execute("""CREATE TABLE IF NOT EXISTS secure_keys (
-                package TEXT NOT NULL, key TEXT NOT NULL,
-                is_used INTEGER DEFAULT 0, device_id TEXT, last_verified REAL,
-                PRIMARY KEY (package, key))""")
-            c.execute("""CREATE TABLE IF NOT EXISTS simple_keys (
-                key TEXT PRIMARY KEY, is_used INTEGER DEFAULT 0,
-                device_id TEXT, last_verified REAL)""")
-            conn.commit()
-        finally:
-            conn.close()
+            with open(DB_JSON_FILE, "r") as f:
+                j = json.load(f)
+            # load simple
+            for k, v in j.get("SIMPLE_KEYS", {}).items():
+                cur.execute("INSERT OR REPLACE INTO simple_keys(key_value,is_used,device_id,last_verified) VALUES(?,?,?,?)",
+                            (k, int(v.get("is_used", False)), v.get("device_id"), v.get("last_verified")))
+            # load secure
+            for pkg, keys in j.get("SECURE_KEYS", {}).items():
+                for k, v in keys.items():
+                    cur.execute("INSERT OR REPLACE INTO secure_keys(package,key_value,is_used,device_id,last_verified) VALUES(?,?,?,?,?)",
+                                (pkg, k, int(v.get("is_used", False)), v.get("device_id"), v.get("last_verified")))
+            con.commit()
+        except Exception:
+            # fallback to defaults
+            write_json_snapshot(DEFAULT_DB)
+            load_defaults_into_sqlite(DEFAULT_DB)
+    elif (simple_count == 0 and secure_count == 0) and not os.path.exists(DB_JSON_FILE):
+        # create both from defaults
+        write_json_snapshot(DEFAULT_DB)
+        load_defaults_into_sqlite(DEFAULT_DB)
 
-def seed_defaults_if_empty():
-    with _db_lock:
-        conn = _get_conn()
-        try:
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) as cnt FROM secure_keys")
-            if c.fetchone()["cnt"] == 0:
-                for pkg, keys in DEFAULT_DB["SECURE_KEYS"].items():
-                    for k, v in keys.items():
-                        c.execute("INSERT OR IGNORE INTO secure_keys VALUES (?, ?, ?, ?, ?)",
-                                  (pkg, k, 0, None, None))
-                for k, v in DEFAULT_DB["SIMPLE_KEYS"].items():
-                    c.execute("INSERT OR IGNORE INTO simple_keys VALUES (?, ?, ?, ?)",
-                              (k, 0, None, None))
-                conn.commit()
-        finally:
-            conn.close()
+    con.close()
+    # ensure json snapshot exists and in sync
+    write_json_snapshot(sqlite_to_json())
 
-init_sqlite()
-seed_defaults_if_empty()
 
-# ---------------- Core DB Functions (atomic) ----------------
-def load_db():
+def load_defaults_into_sqlite(dbobj):
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+    for k, v in dbobj.get("SIMPLE_KEYS", {}).items():
+        cur.execute("INSERT OR REPLACE INTO simple_keys(key_value,is_used,device_id,last_verified) VALUES(?,?,?,?)",
+                    (k, int(v.get("is_used", False)), v.get("device_id"), v.get("last_verified")))
+    for pkg, keys in dbobj.get("SECURE_KEYS", {}).items():
+        for k, v in keys.items():
+            cur.execute("INSERT OR REPLACE INTO secure_keys(package,key_value,is_used,device_id,last_verified) VALUES(?,?,?,?,?)",
+                        (pkg, k, int(v.get("is_used", False)), v.get("device_id"), v.get("last_verified")))
+    con.commit()
+    con.close()
+
+
+def sqlite_to_json():
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
     out = {"SECURE_KEYS": {}, "SIMPLE_KEYS": {}}
-    with _db_lock:
-        conn = _get_conn()
-        try:
-            c = conn.cursor()
-            c.execute("SELECT package, key, is_used, device_id, last_verified FROM secure_keys")
-            for r in c.fetchall():
-                pkg = r["package"]
-                out["SECURE_KEYS"].setdefault(pkg, {})[r["key"]] = {
-                    "is_used": bool(r["is_used"]),
-                    "device_id": r["device_id"],
-                    "last_verified": r["last_verified"]
-                }
-            c.execute("SELECT key, is_used, device_id, last_verified FROM simple_keys")
-            for r in c.fetchall():
-                out["SIMPLE_KEYS"][r["key"]] = {
-                    "is_used": bool(r["is_used"]),
-                    "device_id": r["device_id"],
-                    "last_verified": r["last_verified"]
-                }
-        finally:
-            conn.close()
+    cur.execute("SELECT key_value,is_used,device_id,last_verified FROM simple_keys")
+    for row in cur.fetchall():
+        k, is_used, device_id, last_verified = row
+        out["SIMPLE_KEYS"][k] = {"is_used": bool(is_used), "device_id": device_id, "last_verified": last_verified}
+    cur.execute("SELECT package,key_value,is_used,device_id,last_verified FROM secure_keys")
+    for row in cur.fetchall():
+        pkg, k, is_used, device_id, last_verified = row
+        if pkg not in out["SECURE_KEYS"]:
+            out["SECURE_KEYS"][pkg] = {}
+        out["SECURE_KEYS"][pkg][k] = {"is_used": bool(is_used), "device_id": device_id, "last_verified": last_verified}
+    con.close()
     return out
 
-def save_db(data):
-    with _db_lock:
-        conn = _get_conn()
-        try:
-            c = conn.cursor()
-            c.execute("DELETE FROM secure_keys")
-            c.execute("DELETE FROM simple_keys")
-            for pkg, keys in data.get("SECURE_KEYS", {}).items():
-                for k, meta in keys.items():
-                    c.execute("INSERT INTO secure_keys VALUES (?, ?, ?, ?, ?)",
-                              (pkg, k, int(meta["is_used"]), meta["device_id"], meta["last_verified"]))
-            for k, meta in data.get("SIMPLE_KEYS", {}).items():
-                c.execute("INSERT INTO simple_keys VALUES (?, ?, ?, ?)",
-                          (k, int(meta["is_used"]), meta["device_id"], meta["last_verified"]))
-            conn.commit()
-        finally:
-            conn.close()
-        # Keep JSON backup for compatibility
-        try:
-            with open(JSON_BACKUP, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=4)
-        except Exception:
-            logging.exception("Failed to update JSON backup")
 
-# ---------------- Crypto ----------------
-def custom_decrypt(encoded_text: str) -> str:
-    if not encoded_text: return ""
-    key = XOR_KEY_STRING.encode("utf-8")
-    missing = len(encoded_text) % 4
-    if missing: encoded_text += "=" * (4 - missing)
+def write_json_snapshot(data_obj):
+    # write to JSON exactly as the original code expected
     try:
-        raw = base64.b64decode(encoded_text)
-        return "".join(chr(raw[i] ^ key[i % len(key)]) for i in range(len(raw)))
-    except Exception:
-        return ""
-
-def verify_signature(sig_enc: str) -> bool:
-    try:
-        return custom_decrypt(sig_enc).strip().rstrip("=") == EXPECTED_SIGNATURE.strip().rstrip("=")
-    except Exception:
+        with open(DB_JSON_FILE, "w") as f:
+            json.dump(data_obj, f, indent=4)
+        return True
+    except Exception as e:
+        logging.exception("Failed to write JSON snapshot: %s", e)
         return False
 
-# ---------------- Helper: Bind key to device (core logic) ----------------
-def bind_key_to_device(package, key, device_id, signature=None):
-    with _db_lock:
-        data = load_db()
-        entry = None
-        is_secure = package and signature is not None
 
-        if is_secure:
-            if not verify_signature(signature):
-                return False, "SIGNATURE VERIFICATION FAILED"
-            entry = data["SECURE_KEYS"].get(package, {}).get(key)
-        else:
-            entry = data["SIMPLE_KEYS"].get(key)
+def update_snapshot_from_sqlite():
+    j = sqlite_to_json()
+    write_json_snapshot(j)
 
-        if not entry:
-            return False, "Invalid key"
 
-        if entry["is_used"] and entry["device_id"] != device_id:
-            return False, "Key already in use by another device"
+# Initialize on startup (preserve original JSON logic)
+sql_load_from_json_if_needed()
 
-        entry["is_used"] = True
-        entry["device_id"] = device_id
-        entry["last_verified"] = time.time()
-        save_db(data)
-        return True, "OK"
 
-# ---------------- Routes ----------------
-def require_admin_token(token_expected):
-    token = request.headers.get("X-Admin-Token")
-    if not token or token != token_expected:
-        return jsonify({"error": "Unauthorized"}), 401
-    return None
-
-def force_download():
-    if not os.path.exists(JSON_BACKUP):
-        save_db(load_db())
-    with open(JSON_BACKUP, "rb") as f:
+# ----------------- FORCE DOWNLOAD (preserve original behavior) -----------------
+def force_download(filepath, filename="keys_db.json"):
+    with open(filepath, "rb") as f:
         data = f.read()
     resp = make_response(data)
     resp.headers.set("Content-Type", "application/octet-stream")
-    resp.headers.set("Content-Disposition", 'attachment; filename="keys_db.json"')
+    resp.headers.set("Content-Disposition", f"attachment; filename={filename}")
+    resp.headers.set("Content-Length", len(data))
     return resp
 
+
+# ---------------- CRYPTO / SIGNATURE (unchanged) ----------------
+def custom_decrypt(encoded_text: str) -> str:
+    if not encoded_text:
+        return ""
+    key = XOR_KEY_STRING.encode("utf-8")
+    missing = len(encoded_text) % 4
+    if missing:
+        encoded_text += "=" * (4 - missing)
+    try:
+        raw = base64.b64decode(encoded_text)
+    except Exception:
+        return ""
+    return "".join(chr(raw[i] ^ key[i % len(key)]) for i in range(len(raw)))
+
+
+def verify_signature(sig_enc: str) -> bool:
+    try:
+        dec = custom_decrypt(sig_enc)
+        # match original logic: strip and rstrip "="
+        return dec.strip().rstrip("=") == EXPECTED_SIGNATURE.strip().rstrip("=")
+    except Exception:
+        return False
+
+
+# ----------------- API: add_keys (bulk) -----------------
+@app.route("/add_keys", methods=["POST"])
+def add_keys():
+    # password required (exact behavior requested)
+    if request.headers.get("X-PASS") != PASS_ADD:
+        return jsonify({"error": "Invalid password"}), 403
+
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    package = data.get("package")
+    keys = data.get("keys")
+    if not keys or not isinstance(keys, list):
+        return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
+
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+
+    if not package:
+        for k in keys:
+            cur.execute("INSERT OR IGNORE INTO simple_keys(key_value,is_used,device_id,last_verified) VALUES(?,0,NULL,NULL)", (k,))
+    else:
+        for k in keys:
+            cur.execute("INSERT OR IGNORE INTO secure_keys(package,key_value,is_used,device_id,last_verified) VALUES(?,?,?,?,?)",
+                        (package, k, 0, None, None))
+
+    con.commit()
+    con.close()
+
+    # update json snapshot to maintain original behaviour for downloads
+    update_snapshot_from_sqlite()
+    return force_download(DB_JSON_FILE, "keys_db.json")
+
+
+# ----------------- API: delete_keys (bulk) -----------------
+@app.route("/delete_keys", methods=["POST"])
+def delete_keys():
+    # password required
+    if request.headers.get("X-PASS") != PASS_DELETE:
+        return jsonify({"error": "Invalid password"}), 403
+
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON body"}), 400
+
+    package = data.get("package")
+    keys = data.get("keys")
+    if not keys or not isinstance(keys, list):
+        return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
+
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+
+    deleted = []
+    not_found = []
+
+    if not package:
+        for k in keys:
+            cur.execute("SELECT 1 FROM simple_keys WHERE key_value=?", (k,))
+            if cur.fetchone():
+                cur.execute("DELETE FROM simple_keys WHERE key_value=?", (k,))
+                deleted.append(k)
+            else:
+                not_found.append(k)
+    else:
+        cur.execute("SELECT 1 FROM secure_keys WHERE package=?", (package,))
+        # if package not found -> 404 like original expectation
+        cur.execute("SELECT COUNT(*) FROM secure_keys WHERE package=?", (package,))
+        if cur.fetchone()[0] == 0:
+            con.close()
+            return jsonify({"error": "Package not found in SECURE_KEYS"}), 404
+
+        for k in keys:
+            cur.execute("SELECT 1 FROM secure_keys WHERE package=? AND key_value=?", (package, k))
+            if cur.fetchone():
+                cur.execute("DELETE FROM secure_keys WHERE package=? AND key_value=?", (package, k))
+                deleted.append(k)
+            else:
+                not_found.append(k)
+
+        # remove package entry if empty (in sqlite that's automatic)
+        # but ensure any zero rows remain not present
+
+    con.commit()
+    con.close()
+
+    update_snapshot_from_sqlite()
+    return force_download(DB_JSON_FILE, "keys_db.json")
+
+
+# ----------------- API: add single key (compat) -----------------
+@app.route("/add_key", methods=["POST"])
+def add_key():
+    # keep compatibility; require same add password
+    if request.headers.get("X-PASS") != PASS_ADD:
+        return jsonify({"error": "Invalid password"}), 403
+
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    package = data.get("package")
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+
+    if not package:
+        cur.execute("INSERT OR IGNORE INTO simple_keys(key_value,is_used,device_id,last_verified) VALUES(?,0,NULL,NULL)", (key,))
+    else:
+        cur.execute("INSERT OR IGNORE INTO secure_keys(package,key_value,is_used,device_id,last_verified) VALUES(?,?,?,?,?)",
+                    (package, key, 0, None, None))
+
+    con.commit()
+    con.close()
+
+    update_snapshot_from_sqlite()
+    return force_download(DB_JSON_FILE, "keys_db.json")
+
+
+# ----------------- API: delete single key (compat) -----------------
+@app.route("/delete_key", methods=["POST"])
+def delete_key():
+    # require delete password
+    if request.headers.get("X-PASS") != PASS_DELETE:
+        return jsonify({"error": "Invalid password"}), 403
+
+    data = request.get_json(force=True, silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON"}), 400
+
+    package = data.get("package")
+    key = data.get("key")
+    if not key:
+        return jsonify({"error": "key is required"}), 400
+
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+
+    if not package:
+        cur.execute("SELECT 1 FROM simple_keys WHERE key_value=?", (key,))
+        if cur.fetchone():
+            cur.execute("DELETE FROM simple_keys WHERE key_value=?", (key,))
+            con.commit()
+            con.close()
+            update_snapshot_from_sqlite()
+            return force_download(DB_JSON_FILE, "keys_db.json")
+        else:
+            con.close()
+            return jsonify({"error": "Key not found in SIMPLE_KEYS"}), 404
+    else:
+        cur.execute("SELECT 1 FROM secure_keys WHERE package=? AND key_value=?", (package, key))
+        if cur.fetchone():
+            cur.execute("DELETE FROM secure_keys WHERE package=? AND key_value=?", (package, key))
+            # remove package if empty (no extra action needed)
+            con.commit()
+            con.close()
+            update_snapshot_from_sqlite()
+            return force_download(DB_JSON_FILE, "keys_db.json")
+        else:
+            con.close()
+            return jsonify({"error": "Key not found in SECURE_KEYS for this package"}), 404
+
+
+# ----------------- API: keys verification (GET) -----------------
 @app.route("/keys", methods=["GET"])
 def handle_keys():
     key = request.args.get("key")
@@ -220,130 +393,176 @@ def handle_keys():
     if not key or not device_id:
         return jsonify({"error": "Missing key or device_id"}), 400
 
-    success, msg = bind_key_to_device(package, key, device_id, sig)
-    if not success:
-        return jsonify({"error": msg}), 403 if "use" in msg or "SIGNATURE" in msg else 401
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+
+    is_secure = bool(package and sig)
+
+    if is_secure:
+        if not verify_signature(sig):
+            con.close()
+            return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
+        cur.execute("SELECT is_used,device_id FROM secure_keys WHERE package=? AND key_value=?", (package, key))
+    else:
+        cur.execute("SELECT is_used,device_id FROM simple_keys WHERE key_value=?", (key,))
+
+    row = cur.fetchone()
+    if not row:
+        con.close()
+        return jsonify({"error": "Invalid key or package (secure mode)" if is_secure else "Invalid simple key"}), 401
+
+    entry_is_used, entry_device = row
+
+    if entry_is_used and entry_device != device_id:
+        con.close()
+        return jsonify({"error": "Key already in use by another device"}), 403
+
+    # register/verify (preserve original behavior)
+    now = time.time()
+    if is_secure:
+        cur.execute("UPDATE secure_keys SET is_used=1,device_id=?,last_verified=? WHERE package=? AND key_value=?",
+                    (device_id, now, package, key))
+    else:
+        cur.execute("UPDATE simple_keys SET is_used=1,device_id=?,last_verified=? WHERE key_value=?",
+                    (device_id, now, key))
+
+    con.commit()
+    con.close()
+
+    update_snapshot_from_sqlite()
     return jsonify({"success": True, "message": "Key verified/registered"}), 200
 
+
+# ----------------- API: ids (POST) for device registration -----------------
 @app.route("/ids", methods=["POST"])
 def handle_ids():
     key = request.args.get("key")
     package = request.args.get("package")
     sig = request.args.get("sig")
+
     try:
         device_id = request.data.decode("utf-8").strip()
     except Exception:
-        return jsonify({"error": "Invalid device_id"}), 400
+        device_id = None
 
     if not key or not device_id:
         return jsonify({"error": "Missing key or device_id"}), 400
 
-    success, msg = bind_key_to_device(package, key, device_id, sig)
-    if not success:
-        return jsonify({"error": msg}), 403 if "use" in msg or "SIGNATURE" in msg else 401
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+    is_secure = bool(package and sig)
+
+    if is_secure:
+        if not verify_signature(sig):
+            con.close()
+            return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
+        cur.execute("SELECT is_used,device_id FROM secure_keys WHERE package=? AND key_value=?", (package, key))
+    else:
+        cur.execute("SELECT is_used,device_id FROM simple_keys WHERE key_value=?", (key,))
+
+    row = cur.fetchone()
+    if not row:
+        con.close()
+        return jsonify({"error": "Invalid key/package (secure mode)" if is_secure else "Invalid simple key"}), 401
+
+    entry_is_used, entry_device = row
+    if entry_is_used and entry_device != device_id:
+        con.close()
+        return jsonify({"error": "Key already registered to another device"}), 403
+
+    now = time.time()
+    if is_secure:
+        cur.execute("UPDATE secure_keys SET is_used=1,device_id=?,last_verified=? WHERE package=? AND key_value=?",
+                    (device_id, now, package, key))
+    else:
+        cur.execute("UPDATE simple_keys SET is_used=1,device_id=?,last_verified=? WHERE key_value=?",
+                    (device_id, now, key))
+
+    con.commit()
+    con.close()
+    update_snapshot_from_sqlite()
     return jsonify({"success": True, "message": "Device registered/verified"}), 200
 
-@app.route("/add_keys", methods=["POST"])
-def add_keys():
-    auth = require_admin_token(ADMIN_TOKEN_ADD_DELETE)
-    if auth: return auth
 
-    data = request.get_json(force=True, silent=True)
-    if not data or not isinstance(data.get("keys"), list):
-        return jsonify({"error": "Provide 'keys' as list"}), 400
-
-    package = data.get("package")
-    keys = data.get("keys", [])
-
-    with _db_lock:
-        db = load_db()
-        target = db["SECURE_KEYS"] if package else db["SIMPLE_KEYS"]
-        if package and package not in db["SECURE_KEYS"]:
-            db["SECURE_KEYS"][package] = {}
-
-        for k in keys:
-            if package:
-                if k in db["SECURE_KEYS"][package]:
-                    return jsonify({"error": f"Key '{k}' already exists in package"}), 400
-                db["SECURE_KEYS"][package][k] = {"is_used": False, "device_id": None, "last_verified": None}
-            else:
-                if k in db["SIMPLE_KEYS"]:
-                    return jsonify({"error": f"Simple key '{k}' already exists"}), 400
-                db["SIMPLE_KEYS"][k] = {"is_used": False, "device_id": None, "last_verified": None}
-
-        save_db(db)
-    return force_download()
-
-@app.route("/delete_keys", methods=["POST"])
-def delete_keys():
-    auth = require_admin_token(ADMIN_TOKEN_ADD_DELETE)
-    if auth: return auth
-
-    data = request.get_json(force=True, silent=True)
-    if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
-
-    package = data.get("package")
-    keys = data.get("keys", [])
-
-    with _db_lock:
-        db = load_db()
-        deleted = []
-        if not package:
-            for k in keys:
-                if k in db["SIMPLE_KEYS"]:
-                    del db["SIMPLE_KEYS"][k]
-                    deleted.append(k)
-        else:
-            if package not in db["SECURE_KEYS"]:
-                return jsonify({"error": "Package not found"}), 404
-            for k in keys:
-                if k in db["SECURE_KEYS"][package]:
-                    del db["SECURE_KEYS"][package][k]
-                    deleted.append(k)
-            if not db["SECURE_KEYS"][package]:
-                del db["SECURE_KEYS"][package]
-        save_db(db)
-    return force_download()
-
+# ----------------- API: download DB manually (preserve original behavior) -----------------
 @app.route("/download_db", methods=["GET"])
 def download_db():
-    auth = require_admin_token(ADMIN_TOKEN_DOWNLOAD)
-    if auth: return auth
-    return force_download()
+    if request.headers.get("X-PASS") != PASS_DOWNLOAD:
+        return jsonify({"error": "Invalid password"}), 403
+    # ensure snapshot up-to-date
+    update_snapshot_from_sqlite()
+    if not os.path.exists(DB_JSON_FILE):
+        write_json_snapshot(DEFAULT_DB)
+    return force_download(DB_JSON_FILE, "keys_db.json")
 
+
+# ----------------- API: upload DB (restore after redeploy) -----------------
 @app.route("/upload_db", methods=["POST"])
 def upload_db():
-    auth = require_admin_token(ADMIN_TOKEN_UPLOAD)
-    if auth: return auth
+    if request.headers.get("X-PASS") != PASS_UPLOAD:
+        return jsonify({"error": "Invalid password"}), 403
 
     if "file" not in request.files:
-        return jsonify({"error": "No file"}), 400
-
+        return jsonify({"error": "File missing"}), 400
     file = request.files["file"]
-    temp_path = JSON_BACKUP + ".tmp"
-    file.save(temp_path)
+    # save JSON snapshot
+    file.save(DB_JSON_FILE)
 
+    # reload sqlite from JSON snapshot (preserve original JSON content)
     try:
-        with open(temp_path, "r", encoding="utf-8") as f:
-            new_data = json.load(f)
-        if not isinstance(new_data, dict):
-            raise ValueError("Not a dict")
-        save_db(new_data)
-        return jsonify({"success": True, "message": "DB restored"}), 200
-    except Exception as e:
-        logging.exception("Upload failed")
-        return jsonify({"error": "Invalid file"}), 400
-    finally:
-        try: os.remove(temp_path)
-        except: pass
+        with open(DB_JSON_FILE, "r") as f:
+            j = json.load(f)
+    except Exception:
+        return jsonify({"error": "Uploaded file is not valid JSON"}), 400
 
+    # wipe sqlite and load new
+    init_sqlite()
+    con = sqlite3.connect(DB_SQLITE_FILE)
+    cur = con.cursor()
+    cur.execute("DELETE FROM simple_keys")
+    cur.execute("DELETE FROM secure_keys")
+    con.commit()
+
+    # load contents
+    for k, v in j.get("SIMPLE_KEYS", {}).items():
+        cur.execute("INSERT OR REPLACE INTO simple_keys(key_value,is_used,device_id,last_verified) VALUES(?,?,?,?)",
+                    (k, int(v.get("is_used", False)), v.get("device_id"), v.get("last_verified")))
+    for pkg, keys in j.get("SECURE_KEYS", {}).items():
+        for k, v in keys.items():
+            cur.execute("INSERT OR REPLACE INTO secure_keys(package,key_value,is_used,device_id,last_verified) VALUES(?,?,?,?,?)",
+                        (pkg, k, int(v.get("is_used", False)), v.get("device_id"), v.get("last_verified")))
+    con.commit()
+    con.close()
+
+    return jsonify({"success": True, "message": "Database restored successfully"}), 200
+
+
+# ----------------- API: list all (debug) -----------------
 @app.route("/list_all", methods=["GET"])
 def list_all():
-    auth = require_admin_token(ADMIN_TOKEN_ADD_DELETE)
-    if auth: return auth
-    return jsonify(load_db()), 200
+    # Password check
+    if request.headers.get("X-PASS") != "Xksps":
+        return jsonify({"error": "Invalid password"}), 403
 
-# ---------------- Run ----------------
+    j = sqlite_to_json()
+    return jsonify(j), 200
+    # ----------------- API: debug signature (optional) -----------------
+@app.route("/debug_sig", methods=["GET"])
+def debug_sig():
+    sig = request.args.get("sig")
+    if not sig:
+        return jsonify({"error": "sig missing"}), 400
+    decrypted = custom_decrypt(sig)
+    return jsonify({
+        "encrypted_input": sig,
+        "xor_key": XOR_KEY_STRING,
+        "decrypted": decrypted,
+        "expected": EXPECTED_SIGNATURE
+    }), 200
+
+
+# ---------------- RUN APP ----------------
 if __name__ == "__main__":
+    # ensure sqlite/json initialized
+    sql_load_from_json_if_needed()
     app.run(host="0.0.0.0", port=5000, debug=False)
