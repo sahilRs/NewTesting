@@ -19,7 +19,7 @@ app = Flask(__name__)
 
 DB_FILE = "keys_db.json"
 
-# ---------------- DEFAULT DB ----------------
+# ---------------- DEFAULT DB (used only if DB file missing/corrupt) ----------------
 DEFAULT_DB = {
     "SECURE_KEYS": {
         "com.hul.shikhar.rssm": {
@@ -49,40 +49,46 @@ XOR_KEY_STRING = "xA9fQ7Ls2"
 
 # ---------------- DB HELPERS ----------------
 def save_db(data):
+    """Write DB to file and update in-memory db."""
     with open(DB_FILE, "w") as f:
         json.dump(data, f, indent=4)
+    # update global
+    global db
+    db = data
 
 
 def load_db():
-    # If file missing -> create from defaults
+    """
+    Load DB from disk.
+    - If file missing -> create file with DEFAULT_DB and return copy.
+    - If file corrupt -> overwrite with DEFAULT_DB.
+    - If file exists and valid -> do NOT re-insert default keys; only ensure top-level sections exist.
+    """
     if not os.path.exists(DB_FILE):
-        save_db(DEFAULT_DB)
-        return dict(DEFAULT_DB)  # return a copy
+        # First-time create with defaults
+        save_db(dict(DEFAULT_DB))
+        return dict(DEFAULT_DB)
 
     try:
         with open(DB_FILE, "r") as f:
             data = json.load(f)
     except Exception:
-        # If corrupted -> overwrite with defaults
-        save_db(DEFAULT_DB)
+        # Corrupt -> overwrite with defaults
+        save_db(dict(DEFAULT_DB))
         return dict(DEFAULT_DB)
 
-    # Self-heal missing top-level sections and missing default keys/packages
-    for section in DEFAULT_DB:
-        if section not in data or not isinstance(data[section], dict):
-            data[section] = dict(DEFAULT_DB[section])
-        else:
-            # restore missing package entries
-            for pkg_or_key in DEFAULT_DB[section]:
-                if pkg_or_key not in data[section]:
-                    data[section][pkg_or_key] = dict(DEFAULT_DB[section][pkg_or_key])
+    # Ensure top-level sections exist (but do NOT re-insert default keys)
+    if "SECURE_KEYS" not in data or not isinstance(data["SECURE_KEYS"], dict):
+        data["SECURE_KEYS"] = {}
+    if "SIMPLE_KEYS" not in data or not isinstance(data["SIMPLE_KEYS"], dict):
+        data["SIMPLE_KEYS"] = {}
 
-    # Persist any repairs
+    # Persist any structural fixes
     save_db(data)
     return data
 
 
-# Load DB into memory
+# Load DB into memory at startup
 db = load_db()
 
 
@@ -102,7 +108,6 @@ def custom_decrypt(encoded_text: str) -> str:
     if not encoded_text:
         return ""
     key = XOR_KEY_STRING.encode("utf-8")
-    # fix padding
     missing = len(encoded_text) % 4
     if missing:
         encoded_text += "=" * (4 - missing)
@@ -124,26 +129,18 @@ def verify_signature(sig_enc: str) -> bool:
 # ----------------- API: add_keys (bulk) -----------------
 @app.route("/add_keys", methods=["POST"])
 def add_keys():
-    """
-    Request JSON:
-    {
-        "package": "com.example.pkg"   # optional -> if absent or empty, keys go to SIMPLE_KEYS
-        "keys": ["k1", "k2", ...]      # list of keys to add
-    }
-    Response: auto-download of DB file (attachment)
-    """
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON body"}), 400
 
     package = data.get("package")
     keys = data.get("keys")
-
     if not keys or not isinstance(keys, list):
         return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
 
+    # reload latest disk copy first
     global db
-    db = load_db()  # reload to get fresh
+    db = load_db()
 
     if not package:
         # Add into SIMPLE_KEYS
@@ -163,21 +160,12 @@ def add_keys():
 # ----------------- API: delete_keys (bulk) -----------------
 @app.route("/delete_keys", methods=["POST"])
 def delete_keys():
-    """
-    Request JSON:
-    {
-        "package": "com.example.pkg"   # optional -> if absent or empty, delete from SIMPLE_KEYS
-        "keys": ["k1","k2", ...]       # list of keys to delete
-    }
-    Response: auto-download of DB file (attachment)
-    """
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON body"}), 400
 
     package = data.get("package")
     keys = data.get("keys")
-
     if not keys or not isinstance(keys, list):
         return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
 
@@ -208,6 +196,7 @@ def delete_keys():
         if package in db["SECURE_KEYS"] and not db["SECURE_KEYS"][package]:
             del db["SECURE_KEYS"][package]
 
+    # persist and return current DB file
     save_db(db)
     return force_download(DB_FILE, "keys_db.json")
 
@@ -215,10 +204,6 @@ def delete_keys():
 # ----------------- API: add single key (compat) -----------------
 @app.route("/add_key", methods=["POST"])
 def add_key():
-    """
-    Request JSON:
-    { "package": "...", "key": "k1" }   # package optional -> SIMPLE_KEYS if missing
-    """
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
@@ -245,10 +230,6 @@ def add_key():
 # ----------------- API: delete single key (compat) -----------------
 @app.route("/delete_key", methods=["POST"])
 def delete_key():
-    """
-    Request JSON:
-    { "package": "...", "key": "k1" }   # package optional -> SIMPLE_KEYS if missing
-    """
     data = request.get_json(force=True, silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
@@ -283,11 +264,6 @@ def delete_key():
 # ----------------- API: keys verification (GET) -----------------
 @app.route("/keys", methods=["GET"])
 def handle_keys():
-    """
-    Example:
-    GET /keys?key=k1&device_id=dev123            -> simple mode
-    GET /keys?key=k1&device_id=dev123&package=com.pkg&sig=ENC_SIG  -> secure mode (requires sig)
-    """
     key = request.args.get("key")
     device_id = request.args.get("device_id")
     package = request.args.get("package")
@@ -328,10 +304,6 @@ def handle_keys():
 # ----------------- API: ids (POST) for device registration -----------------
 @app.route("/ids", methods=["POST"])
 def handle_ids():
-    """
-    POST /ids?key=k1&package=com.pkg&sig=ENC_SIG
-    Body: raw device_id (plain text)
-    """
     key = request.args.get("key")
     package = request.args.get("package")
     sig = request.args.get("sig")
