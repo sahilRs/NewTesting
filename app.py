@@ -1,7 +1,9 @@
 import os
-import sqlite3
+import json
+import base64
 import time
 import logging
+import sqlite3
 from threading import Lock
 from flask import Flask, request, jsonify, make_response, send_file
 
@@ -17,31 +19,51 @@ logging.basicConfig(
 
 app = Flask(__name__)
 
-# ---------------- DB (SQLite) ----------------
-DB_PATH = "keys.db"
-db_lock = Lock()
+# ---------------- Files / constants ----------------
+DB_FILE = "keys_db.json"   # kept for compatibility & downloads (will be regenerated from SQLite)
+SQLITE_DB = "keys.sqlite"
+_db_lock = Lock()
 
-# ---------------- DEFAULT DATA (only used to seed if DB empty) ----------------
-DEFAULT_SECURE = {
-    "com.hul.shikhar.rssm": ["d1", "d2"],
-    "com.sahil.work": ["s1", "s2"],
-    "com.aebas.aebas_client": ["adhar1", "adhar2"],
+# ---------------- DEFAULT DB (used only if DB file missing/corrupt) ----------------
+DEFAULT_DB = {
+    "SECURE_KEYS": {
+        "com.hul.shikhar.rssm": {
+            "d1": {"is_used": False, "device_id": None, "last_verified": None},
+            "d2": {"is_used": False, "device_id": None, "last_verified": None}
+        },
+        "com.sahil.work": {
+            "s1": {"is_used": False, "device_id": None, "last_verified": None},
+            "s2": {"is_used": False, "device_id": None, "last_verified": None}
+        },
+        "com.aebas.aebas_client": {
+            "adhar1": {"is_used": False, "device_id": None, "last_verified": None},
+            "adhar2": {"is_used": False, "device_id": None, "last_verified": None}
+        }
+    },
+    "SIMPLE_KEYS": {
+        "d-0924-3841": {"is_used": False, "device_id": None, "last_verified": None},
+        "x-0924-3841": {"is_used": False, "device_id": None, "last_verified": None},
+        "s-2227-7194": {"is_used": False, "device_id": None, "last_verified": None}
+    }
 }
-DEFAULT_SIMPLE = ["d-0924-3841", "x-0924-3841", "s-2227-7194"]
-
 
 # --- Signature settings (kept from earlier) ---
 EXPECTED_SIGNATURE = "1D:03:E2:BD:74:A8:FB:B3:2D:B8:28:F1:16:7B:CC:56:3C:F1:AD:B4:CA:16:8B:6F:FD:D4:08:43:92:41:B3:0C"
 XOR_KEY_STRING = "xA9fQ7Ls2"
 
+# ---------------- SQLite initialization ----------------
+def _get_conn():
+    # check_same_thread False because we protect with _db_lock
+    conn = sqlite3.connect(SQLITE_DB, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-# ---------------- SQLite helpers ----------------
-def init_db():
-    """Create DB and tables if they don't exist and seed defaults if empty."""
-    with db_lock:
-        conn = sqlite3.connect(DB_PATH)
+def init_sqlite():
+    with _db_lock:
+        conn = _get_conn()
         try:
             c = conn.cursor()
+            # secure_keys: package + key composite PK
             c.execute("""
                 CREATE TABLE IF NOT EXISTS secure_keys (
                     package TEXT NOT NULL,
@@ -52,6 +74,7 @@ def init_db():
                     PRIMARY KEY (package, key)
                 )
             """)
+            # simple_keys: key PK
             c.execute("""
                 CREATE TABLE IF NOT EXISTS simple_keys (
                     key TEXT PRIMARY KEY,
@@ -61,54 +84,169 @@ def init_db():
                 )
             """)
             conn.commit()
+        finally:
+            conn.close()
 
-            # seed defaults if tables empty
-            c.execute("SELECT COUNT(*) FROM secure_keys")
-            if c.fetchone()[0] == 0:
-                for pkg, keys in DEFAULT_SECURE.items():
-                    for k in keys:
-                        c.execute("""
-                            INSERT OR IGNORE INTO secure_keys (package, key)
-                            VALUES (?, ?)
-                        """, (pkg, k))
-            c.execute("SELECT COUNT(*) FROM simple_keys")
-            if c.fetchone()[0] == 0:
-                for k in DEFAULT_SIMPLE:
-                    c.execute("""
-                        INSERT OR IGNORE INTO simple_keys (key)
-                        VALUES (?)
-                    """, (k,))
+# Seed DB from DEFAULT_DB only if database empty
+def seed_defaults_if_empty():
+    with _db_lock:
+        conn = _get_conn()
+        try:
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) as cnt FROM secure_keys")
+            if c.fetchone()["cnt"] == 0:
+                for pkg, keys in DEFAULT_DB["SECURE_KEYS"].items():
+                    for k, meta in keys.items():
+                        c.execute(
+                            "INSERT OR IGNORE INTO secure_keys (package, key, is_used, device_id, last_verified) VALUES (?, ?, ?, ?, ?)",
+                            (pkg, k, 1 if meta.get("is_used") else 0, meta.get("device_id"), meta.get("last_verified"))
+                        )
+            c.execute("SELECT COUNT(*) as cnt FROM simple_keys")
+            if c.fetchone()["cnt"] == 0:
+                for k, meta in DEFAULT_DB["SIMPLE_KEYS"].items():
+                    c.execute(
+                        "INSERT OR IGNORE INTO simple_keys (key, is_used, device_id, last_verified) VALUES (?, ?, ?, ?)",
+                        (k, 1 if meta.get("is_used") else 0, meta.get("device_id"), meta.get("last_verified"))
+                    )
             conn.commit()
         finally:
             conn.close()
 
+# call at startup
+init_sqlite()
+seed_defaults_if_empty()
 
-def _conn():
-    """Return a sqlite3 connection configured for rows."""
-    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def query(sql, params=(), commit=False, one=False):
-    with db_lock:
-        conn = _conn()
+# ---------------- DB HELPERS (shim to preserve original logic) ----------------
+def save_db(data):
+    """
+    Save the provided data dict into SQLite (overwrite existing data).
+    Also regenerate keys_db.json file for compatibility with original endpoints that return the JSON file.
+    """
+    # data expected to follow DEFAULT_DB structure
+    with _db_lock:
+        conn = _get_conn()
         try:
-            cur = conn.cursor()
-            cur.execute(sql, params)
-            if commit:
-                conn.commit()
-            if one:
-                return cur.fetchone()
-            return cur.fetchall()
+            c = conn.cursor()
+            # wipe tables
+            c.execute("DELETE FROM secure_keys")
+            c.execute("DELETE FROM simple_keys")
+            # insert secure keys
+            for pkg, keys in data.get("SECURE_KEYS", {}).items():
+                for k, meta in keys.items():
+                    is_used = 1 if meta.get("is_used") else 0
+                    device_id = meta.get("device_id")
+                    last_verified = meta.get("last_verified")
+                    c.execute(
+                        "INSERT INTO secure_keys (package, key, is_used, device_id, last_verified) VALUES (?, ?, ?, ?, ?)",
+                        (pkg, k, is_used, device_id, last_verified)
+                    )
+            # insert simple keys
+            for k, meta in data.get("SIMPLE_KEYS", {}).items():
+                is_used = 1 if meta.get("is_used") else 0
+                device_id = meta.get("device_id")
+                last_verified = meta.get("last_verified")
+                c.execute(
+                    "INSERT INTO simple_keys (key, is_used, device_id, last_verified) VALUES (?, ?, ?, ?)",
+                    (k, is_used, device_id, last_verified)
+                )
+            conn.commit()
         finally:
             conn.close()
 
+    # regenerate JSON file for compatibility (file contents reflect saved DB)
+    try:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+    except Exception:
+        logging.exception("Failed to write JSON backup file after saving DB.")
 
-# ---------------- CRYPTO / SIGNATURE ----------------
-import base64
 
+def load_db():
+    """
+    Read the DB from SQLite and return a dict structured exactly like DEFAULT_DB.
+    If SQLite missing or empty/corrupt, create JSON backup and seed defaults.
+    """
+    # If sqlite missing for some reason, create and seed
+    if not os.path.exists(SQLITE_DB):
+        init_sqlite()
+        seed_defaults_if_empty()
+        # write DEFAULT_DB to JSON as well
+        try:
+            with open(DB_FILE, "w", encoding="utf-8") as f:
+                json.dump(DEFAULT_DB, f, indent=4)
+        except Exception:
+            pass
+        return dict(DEFAULT_DB)
 
+    out = {"SECURE_KEYS": {}, "SIMPLE_KEYS": {}}
+
+    with _db_lock:
+        conn = _get_conn()
+        try:
+            c = conn.cursor()
+            try:
+                c.execute("SELECT package, key, is_used, device_id, last_verified FROM secure_keys")
+                rows = c.fetchall()
+                for r in rows:
+                    pkg = r["package"]
+                    k = r["key"]
+                    out["SECURE_KEYS"].setdefault(pkg, {})
+                    out["SECURE_KEYS"][pkg][k] = {
+                        "is_used": bool(r["is_used"]),
+                        "device_id": r["device_id"],
+                        "last_verified": r["last_verified"]
+                    }
+
+                c.execute("SELECT key, is_used, device_id, last_verified FROM simple_keys")
+                rows = c.fetchall()
+                for r in rows:
+                    k = r["key"]
+                    out["SIMPLE_KEYS"][k] = {
+                        "is_used": bool(r["is_used"]),
+                        "device_id": r["device_id"],
+                        "last_verified": r["last_verified"]
+                    }
+            except Exception:
+                # If anything goes wrong reading sqlite, fallback to DEFAULT_DB and re-seed
+                logging.exception("Error reading SQLite DB — re-seeding defaults.")
+                save_db(dict(DEFAULT_DB))
+                return dict(DEFAULT_DB)
+        finally:
+            conn.close()
+
+    # ensure top-level sections exist
+    if "SECURE_KEYS" not in out or not isinstance(out["SECURE_KEYS"], dict):
+        out["SECURE_KEYS"] = {}
+    if "SIMPLE_KEYS" not in out or not isinstance(out["SIMPLE_KEYS"], dict):
+        out["SIMPLE_KEYS"] = {}
+
+    # persist JSON copy (to keep parity with older behavior where a JSON file always exists)
+    try:
+        with open(DB_FILE, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=4)
+    except Exception:
+        logging.exception("Failed to write JSON backup file in load_db().")
+
+    return out
+
+# Load DB into memory at startup (keeps same variable as original)
+db = load_db()
+
+# ----------------- FORCE DOWNLOAD (keeps original behavior) -----------------
+def force_download(filepath, filename="keys_db.json"):
+    # ensure JSON file exists; if not, regenerate from sqlite
+    if not os.path.exists(filepath):
+        # regenerate from sqlite
+        _ = load_db()
+    with open(filepath, "rb") as f:
+        data = f.read()
+    resp = make_response(data)
+    resp.headers.set("Content-Type", "application/octet-stream")
+    resp.headers.set("Content-Disposition", f"attachment; filename={filename}")
+    resp.headers.set("Content-Length", len(data))
+    return resp
+
+# ---------------- CRYPTO / SIGNATURE (unchanged) ----------------
 def custom_decrypt(encoded_text: str) -> str:
     if not encoded_text:
         return ""
@@ -122,99 +260,12 @@ def custom_decrypt(encoded_text: str) -> str:
         return ""
     return "".join(chr(raw[i] ^ key[i % len(key)]) for i in range(len(raw)))
 
-
 def verify_signature(sig_enc: str) -> bool:
     try:
         dec = custom_decrypt(sig_enc)
-        # compare trimmed forms
         return dec.strip().rstrip("=") == EXPECTED_SIGNATURE.strip().rstrip("=")
     except Exception:
         return False
-
-
-# ----------------- CRUD helpers for keys ----------------
-def secure_key_exists(package, key):
-    row = query(
-        "SELECT is_used, device_id, last_verified FROM secure_keys WHERE package=? AND key=?",
-        (package, key), one=True
-    )
-    return row
-
-
-def simple_key_exists(key):
-    row = query(
-        "SELECT is_used, device_id, last_verified FROM simple_keys WHERE key=?",
-        (key,), one=True
-    )
-    return row
-
-
-def add_secure_key(package, key):
-    query("""
-        INSERT OR IGNORE INTO secure_keys (package, key, is_used, device_id, last_verified)
-        VALUES (?, ?, 0, NULL, NULL)
-    """, (package, key), commit=True)
-
-
-def add_simple_key(key):
-    query("""
-        INSERT OR IGNORE INTO simple_keys (key, is_used, device_id, last_verified)
-        VALUES (?, 0, NULL, NULL)
-    """, (key,), commit=True)
-
-
-def delete_secure_key(package, key):
-    query("DELETE FROM secure_keys WHERE package=? AND key=?", (package, key), commit=True)
-
-
-def delete_simple_key(key):
-    query("DELETE FROM simple_keys WHERE key=?", (key,), commit=True)
-
-
-def update_secure_key(package, key, device_id):
-    now = time.time()
-    query("""
-        UPDATE secure_keys
-        SET is_used=1, device_id=?, last_verified=?
-        WHERE package=? AND key=?
-    """, (device_id, now, package, key), commit=True)
-
-
-def update_simple_key(key, device_id):
-    now = time.time()
-    query("""
-        UPDATE simple_keys
-        SET is_used=1, device_id=?, last_verified=?
-        WHERE key=?
-    """, (device_id, now, key), commit=True)
-
-
-def list_all_keys_as_dict():
-    out = {"SECURE_KEYS": {}, "SIMPLE_KEYS": {}}
-    rows = query("SELECT package, key, is_used, device_id, last_verified FROM secure_keys")
-    for r in rows:
-        pkg = r["package"]
-        k = r["key"]
-        out["SECURE_KEYS"].setdefault(pkg, {})
-        out["SECURE_KEYS"][pkg][k] = {
-            "is_used": bool(r["is_used"]),
-            "device_id": r["device_id"],
-            "last_verified": r["last_verified"]
-        }
-    rows = query("SELECT key, is_used, device_id, last_verified FROM simple_keys")
-    for r in rows:
-        k = r["key"]
-        out["SIMPLE_KEYS"][k] = {
-            "is_used": bool(r["is_used"]),
-            "device_id": r["device_id"],
-            "last_verified": r["last_verified"]
-        }
-    return out
-
-
-# initialize DB on startup
-init_db()
-
 
 # ----------------- API: add_keys (bulk) -----------------
 @app.route("/add_keys", methods=["POST"])
@@ -228,18 +279,23 @@ def add_keys():
     if not keys or not isinstance(keys, list):
         return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
 
+    # reload latest disk copy first
+    global db
+    db = load_db()
+
     if not package:
         # Add into SIMPLE_KEYS
         for k in keys:
-            add_simple_key(k)
+            db["SIMPLE_KEYS"][k] = {"is_used": False, "device_id": None, "last_verified": None}
     else:
         # Add into SECURE_KEYS[package]
+        if package not in db["SECURE_KEYS"]:
+            db["SECURE_KEYS"][package] = {}
         for k in keys:
-            add_secure_key(package, k)
+            db["SECURE_KEYS"][package][k] = {"is_used": False, "device_id": None, "last_verified": None}
 
-    # return DB file for compatibility
-    return send_file(DB_PATH, as_attachment=True, download_name="keys.db")
-
+    save_db(db)
+    return force_download(DB_FILE, "keys_db.json")
 
 # ----------------- API: delete_keys (bulk) -----------------
 @app.route("/delete_keys", methods=["POST"])
@@ -253,28 +309,36 @@ def delete_keys():
     if not keys or not isinstance(keys, list):
         return jsonify({"error": "Provide 'keys' as a non-empty list"}), 400
 
+    global db
+    db = load_db()
+
     deleted = []
     not_found = []
 
     if not package:
         # delete from SIMPLE_KEYS
         for k in keys:
-            if simple_key_exists(k):
-                delete_simple_key(k)
+            if k in db["SIMPLE_KEYS"]:
+                del db["SIMPLE_KEYS"][k]
                 deleted.append(k)
             else:
                 not_found.append(k)
     else:
+        if package not in db["SECURE_KEYS"]:
+            return jsonify({"error": "Package not found in SECURE_KEYS"}), 404
         for k in keys:
-            if secure_key_exists(package, k):
-                delete_secure_key(package, k)
+            if k in db["SECURE_KEYS"][package]:
+                del db["SECURE_KEYS"][package][k]
                 deleted.append(k)
             else:
                 not_found.append(k)
+        # if package becomes empty, remove package entry
+        if package in db["SECURE_KEYS"] and not db["SECURE_KEYS"][package]:
+            del db["SECURE_KEYS"][package]
 
-    # return DB file for compatibility
-    return send_file(DB_PATH, as_attachment=True, download_name="keys.db")
-
+    # persist and return current DB file
+    save_db(db)
+    return force_download(DB_FILE, "keys_db.json")
 
 # ----------------- API: add single key (compat) -----------------
 @app.route("/add_key", methods=["POST"])
@@ -288,13 +352,18 @@ def add_key():
     if not key:
         return jsonify({"error": "key is required"}), 400
 
+    global db
+    db = load_db()
+
     if not package:
-        add_simple_key(key)
+        db["SIMPLE_KEYS"][key] = {"is_used": False, "device_id": None, "last_verified": None}
     else:
-        add_secure_key(package, key)
+        if package not in db["SECURE_KEYS"]:
+            db["SECURE_KEYS"][package] = {}
+        db["SECURE_KEYS"][package][key] = {"is_used": False, "device_id": None, "last_verified": None}
 
-    return send_file(DB_PATH, as_attachment=True, download_name="keys.db")
-
+    save_db(db)
+    return force_download(DB_FILE, "keys_db.json")
 
 # ----------------- API: delete single key (compat) -----------------
 @app.route("/delete_key", methods=["POST"])
@@ -308,20 +377,26 @@ def delete_key():
     if not key:
         return jsonify({"error": "key is required"}), 400
 
+    global db
+    db = load_db()
+
     if not package:
-        if simple_key_exists(key):
-            delete_simple_key(key)
-            return send_file(DB_PATH, as_attachment=True, download_name="keys.db")
+        if key in db["SIMPLE_KEYS"]:
+            del db["SIMPLE_KEYS"][key]
+            save_db(db)
+            return force_download(DB_FILE, "keys_db.json")
         else:
             return jsonify({"error": "Key not found in SIMPLE_KEYS"}), 404
     else:
-        if secure_key_exists(package, key):
-            delete_secure_key(package, key)
-            # remove package row cleanup is automatic --- no separate package table
-            return send_file(DB_PATH, as_attachment=True, download_name="keys.db")
+        if package in db["SECURE_KEYS"] and key in db["SECURE_KEYS"][package]:
+            del db["SECURE_KEYS"][package][key]
+            # remove empty package
+            if not db["SECURE_KEYS"][package]:
+                del db["SECURE_KEYS"][package]
+            save_db(db)
+            return force_download(DB_FILE, "keys_db.json")
         else:
             return jsonify({"error": "Key not found in SECURE_KEYS for this package"}), 404
-
 
 # ----------------- API: keys verification (GET) -----------------
 @app.route("/keys", methods=["GET"])
@@ -334,44 +409,33 @@ def handle_keys():
     if not key or not device_id:
         return jsonify({"error": "Missing key or device_id"}), 400
 
+    global db
+    db = load_db()
+
     is_secure = bool(package and sig)
 
     if is_secure:
         if not verify_signature(sig):
             return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
-        row = secure_key_exists(package, key)
-        if not row:
+        if package not in db["SECURE_KEYS"] or key not in db["SECURE_KEYS"][package]:
             return jsonify({"error": "Invalid key or package (secure mode)"}), 401
-        is_used = bool(row["is_used"])
-        old_device = row["device_id"]
-        # key already used by another device
-        if is_used and old_device and old_device != device_id:
-            return jsonify({"error": "Key already in use by another device"}), 403
-
-        # if already used by same device, just update last_verified to avoid unnecessary writes to other fields
-        if is_used and old_device == device_id:
-            update_secure_key(package, key, device_id)  # update last_verified timestamp
-            return jsonify({"success": True, "message": "Key verified"}), 200
-
-        # new registration or previously unused
-        update_secure_key(package, key, device_id)
-        return jsonify({"success": True, "message": "Key verified/registered"}), 200
+        entry = db["SECURE_KEYS"][package][key]
     else:
-        row = simple_key_exists(key)
-        if not row:
+        if key not in db["SIMPLE_KEYS"]:
             return jsonify({"error": "Invalid simple key"}), 401
-        is_used = bool(row["is_used"])
-        old_device = row["device_id"]
-        if is_used and old_device and old_device != device_id:
-            return jsonify({"error": "Key already in use by another device"}), 403
+        entry = db["SIMPLE_KEYS"][key]
 
-        if is_used and old_device == device_id:
-            update_simple_key(key, device_id)  # bump last_verified
-            return jsonify({"success": True, "message": "Key verified"}), 200
+    # key already used by another device
+    if entry.get("is_used") and entry.get("device_id") != device_id:
+        return jsonify({"error": "Key already in use by another device"}), 403
 
-        update_simple_key(key, device_id)
-        return jsonify({"success": True, "message": "Key verified/registered"}), 200
+    # register/verify
+    entry["is_used"] = True
+    entry["device_id"] = device_id
+    entry["last_verified"] = time.time()
 
+    save_db(db)
+    return jsonify({"success": True, "message": "Key verified/registered"}), 200
 
 # ----------------- API: ids (POST) for device registration -----------------
 @app.route("/ids", methods=["POST"])
@@ -388,41 +452,38 @@ def handle_ids():
     if not key or not device_id:
         return jsonify({"error": "Missing key or device_id"}), 400
 
+    global db
+    db = load_db()
     is_secure = bool(package and sig)
 
     if is_secure:
         if not verify_signature(sig):
             return jsonify({"error": "SIGNATURE VERIFICATION FAILED"}), 403
-        row = secure_key_exists(package, key)
-        if not row:
+        if package not in db["SECURE_KEYS"] or key not in db["SECURE_KEYS"][package]:
             return jsonify({"error": "Invalid key/package (secure mode)"}), 401
-        is_used = bool(row["is_used"])
-        old_device = row["device_id"]
-        if is_used and old_device and old_device != device_id:
-            return jsonify({"error": "Key already registered to another device"}), 403
-
-        update_secure_key(package, key, device_id)
-        return jsonify({"success": True, "message": "Device registered/verified"}), 200
+        entry = db["SECURE_KEYS"][package][key]
     else:
-        row = simple_key_exists(key)
-        if not row:
+        if key not in db["SIMPLE_KEYS"]:
             return jsonify({"error": "Invalid simple key"}), 401
-        is_used = bool(row["is_used"])
-        old_device = row["device_id"]
-        if is_used and old_device and old_device != device_id:
-            return jsonify({"error": "Key already registered to another device"}), 403
+        entry = db["SIMPLE_KEYS"][key]
 
-        update_simple_key(key, device_id)
-        return jsonify({"success": True, "message": "Device registered/verified"}), 200
+    if entry.get("is_used") and entry.get("device_id") != device_id:
+        return jsonify({"error": "Key already registered to another device"}), 403
 
+    entry["is_used"] = True
+    entry["device_id"] = device_id
+    entry["last_verified"] = time.time()
+
+    save_db(db)
+    return jsonify({"success": True, "message": "Device registered/verified"}), 200
 
 # ----------------- API: download DB manually -----------------
 @app.route("/download_db", methods=["GET"])
 def download_db():
-    if not os.path.exists(DB_PATH):
-        init_db()
-    return send_file(DB_PATH, as_attachment=True, download_name="keys.db")
-
+    # regenerate JSON if missing or stale
+    if not os.path.exists(DB_FILE):
+        save_db(load_db())
+    return force_download(DB_FILE, "keys_db.json")
 
 # ----------------- API: upload DB (restore after redeploy) -----------------
 @app.route("/upload_db", methods=["POST"])
@@ -430,18 +491,40 @@ def upload_db():
     if "file" not in request.files:
         return jsonify({"error": "File missing"}), 400
     file = request.files["file"]
-    # save uploaded file as DB_PATH (overwrite)
-    file.save(DB_PATH)
-    # basic sanity: ensure tables exist (init_db is safe to call)
-    init_db()
-    return jsonify({"success": True, "message": "Database restored successfully"}), 200
+    # Save uploaded JSON to disk then load it and write to SQLite via save_db
+    uploaded_path = DB_FILE + ".upload"
+    file.save(uploaded_path)
+    try:
+        with open(uploaded_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # validate structure minimally
+        if not isinstance(data, dict):
+            raise ValueError("Invalid JSON")
+        save_db(data)
+    except Exception:
+        logging.exception("Uploaded DB invalid")
+        return jsonify({"error": "Uploaded file invalid"}), 400
+    finally:
+        try:
+            os.remove(uploaded_path)
+        except Exception:
+            pass
 
+    # reload in-memory db
+    global db
+    db = load_db()
+    return jsonify({"success": True, "message": "Database restored successfully"}), 200
 
 # ----------------- API: list all (debug) -----------------
 @app.route("/list_all", methods=["GET"])
 def list_all():
-    return jsonify(list_all_keys_as_dict()), 200
+    global db
+    db = load_db()
+    return jsonify(db), 200
 
+# ----------------- API: reset DB to defaults -----------------
+# NOTE: you asked earlier to remove reset_db endpoint. Keeping it removed here (do not add).
+# If you want it re-added, tell me.
 
 # ----------------- API: debug signature (optional) -----------------
 @app.route("/debug_sig", methods=["GET"])
@@ -456,7 +539,6 @@ def debug_sig():
         "decrypted": decrypted,
         "expected": EXPECTED_SIGNATURE
     }), 200
-
 
 # ---------------- RUN APP ----------------
 if __name__ == "__main__":
