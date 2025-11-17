@@ -493,26 +493,41 @@ def handle_ids():
 # ----------------- API: download DB manually -----------------
 @app.route("/download_db", methods=["GET"])
 def download_db():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "XNSLNSJ":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     # regenerate JSON if missing or stale
     if not os.path.exists(DB_FILE):
         save_db(load_db())
+
     return force_download(DB_FILE, "keys_db.json")
 
 # ----------------- API: upload DB (restore after redeploy) -----------------
 @app.route("/upload_db", methods=["POST"])
 def upload_db():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "ADMINUPLOAD9027":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     if "file" not in request.files:
         return jsonify({"error": "File missing"}), 400
+
     file = request.files["file"]
-    # Save uploaded JSON to disk then load it and write to SQLite via save_db
     uploaded_path = DB_FILE + ".upload"
     file.save(uploaded_path)
+
     try:
         with open(uploaded_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        # validate structure minimally
+
         if not isinstance(data, dict):
             raise ValueError("Invalid JSON")
+
         save_db(data)
     except Exception:
         logging.exception("Uploaded DB invalid")
@@ -523,14 +538,18 @@ def upload_db():
         except Exception:
             pass
 
-    # reload in-memory db
     global db
     db = load_db()
     return jsonify({"success": True, "message": "Database restored successfully"}), 200
-
 # ----------------- API: list all (debug) -----------------
 @app.route("/list_all", methods=["GET"])
 def list_all():
+    # ---- PASSWORD CHECK ----
+    pwd = request.args.get("password")
+    if pwd != "NAINAK82JS":
+        return jsonify({"error": "INVALID PASSWORD"}), 401
+    # -------------------------
+
     global db
     db = load_db()
     return jsonify(db), 200
