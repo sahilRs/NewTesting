@@ -371,13 +371,7 @@ def list_all():
     return jsonify(db), 200
 
 
-# ----------------- API: reset DB to defaults -----------------
-@app.route("/reset_db", methods=["POST"])
-def reset_db():
-    save_db(DEFAULT_DB)
-    global db
-    db = load_db()
-    return jsonify({"success": True, "message": "DB reset to default"}), 200
+
 
 
 # ----------------- API: debug signature (optional) -----------------
